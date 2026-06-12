@@ -1,0 +1,49 @@
+name: Build and Release
+
+# Runs when you push a version tag like v0.10.3, and attaches the built
+# Reclaim.exe to a GitHub Release automatically.
+on:
+  push:
+    tags:
+      - 'v*'
+  # Also allow running manually from the Actions tab to just build (no release).
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write   # needed to create the release and upload the exe
+
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Run core tests
+        run: dotnet run --project src/Reclaim.Core.Tests -c Release
+
+      - name: Publish self-contained single-file exe
+        run: >
+          dotnet publish src/Reclaim.App -c Release -r win-x64
+          --self-contained true
+          -p:PublishSingleFile=true
+          -o publish
+
+      - name: Upload exe as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Reclaim-win-x64
+          path: publish/Reclaim.exe
+
+      # When triggered by a tag, also create a Release with the exe attached.
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: publish/Reclaim.exe
+          generate_release_notes: true
