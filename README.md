@@ -5,55 +5,83 @@ exactly what is using your storage, understand what each file is, and safely
 reclaim space.
 
 Reclaim scans a folder or drive and shows the results as a sortable tree and a
-treemap where every file is a rectangle proportional to its size. Beyond
-visualization, it identifies reclaimable space, explains what individual files
-are, finds duplicates, and can carefully remove what you choose — always
-recoverable by default.
+colour-coded treemap where every file is a rectangle proportional to its size.
+Beyond visualization, it identifies reclaimable space, explains what individual
+files are, finds duplicate and forgotten files, and can carefully remove what
+you choose — always recoverable by default.
 
-**Status: v0.10 — a complete, usable tool.** Storage visualization, cleanup
-analysis, cautious deletion, file descriptions, duplicate detection, and
-Recycle Bin management are all in place.
+**Status: actively developed and usable.** Storage visualization, cleanup
+analysis, cautious deletion, file descriptions, duplicate detection, a large-and-old
+file finder, Recycle Bin management, optional elevation, crash reporting, and a
+self-contained distributable build are all in place.
 
 ## Features
 
 ### Storage mode
 - **Parallel scanner** that walks a drive in seconds and reports size, file, and
-  folder counts. Unreadable folders (access denied) are shown and excluded from
-  totals rather than failing the scan; reparse points (junctions, symlinks,
-  OneDrive placeholders) are skipped to avoid double-counting.
-- **Treemap** with labels on blocks; double-click any block to jump straight to
-  the folder it lives in, **← Back** to step out.
+  folder counts. It reads each file's size and last-modified time in a single
+  enumeration pass (no per-file stat calls). Unreadable folders (access denied)
+  are shown and excluded from totals rather than failing the scan; reparse points
+  (junctions, symlinks, OneDrive placeholders) are skipped to avoid double-counting.
+- **Folder-coloured treemap**: every top-level folder gets its own hue and all of
+  its contents share that colour family, so at a glance you can see which big
+  folders (Windows, a game library, your downloads) are eating space. Colours are
+  anchored to the scan root, so they stay consistent as you drill in. Double-click
+  any block to jump to the folder it lives in; **← Back** steps out.
 - **Tree and list views** sharing one focus, with a clickable breadcrumb.
 - A **declutter slider** to hide files below a chosen size.
 - **"What is this?" file descriptions**: select any file or folder and a panel
   explains what it is, what created it, its typical size, and whether it's safe
-  to remove. Knows common system files, folders, and extensions, and infers
-  sensible context from a file's location (e.g. anything under System32 is
-  flagged as a Windows system file) even when it has no specific entry.
+  to remove. It knows common system files, folders, and extensions, and infers
+  sensible context from a file's location (e.g. a file under System32 is described
+  as a Windows system file) even when it has no specific entry.
 - **Manual deletion** via right-click: delete a file, empty a folder's contents
   (keeping the folder), or delete a whole folder. Recoverable by default.
 
 ### Cleanup mode
-- **Reclaimable-space analysis**: a bundled rule catalog identifies shader
-  caches, thumbnails, temp files, crash dumps, browser and dev-tool caches, and
-  system-maintenance areas, each with a safety tier and plain-language reason.
+- **Reclaimable-space analysis**: a bundled rule catalog (~30 rules) identifies
+  shader caches, thumbnails, temp files, crash dumps, browser caches (Chrome,
+  Edge, Firefox, Brave, Opera, Vivaldi), developer and package-manager caches
+  (npm, Yarn, NuGet, pip, Gradle, Maven, Cargo, Go, VS Code), game-launcher
+  caches (Steam, Epic, Battle.net, DirectX), and system-maintenance areas — each
+  with a safety tier and a plain-language reason.
+- **Accurate accounting**: cleanup reports the bytes actually freed and separately
+  counts files that were skipped because they were in use, so the numbers are
+  honest. The pre-clean estimate is shown as "up to X" since in-use files are
+  skipped.
 - **Cautious deletion**: select items per-file or per-category and clean them.
   Safe caches go to the **Recycle Bin** by default; permanent deletion is an
-  explicit opt-in. Matched cache folders keep the folder and remove only its
+  explicit opt-in. Matched cache folders keep the folder and remove only their
   contents. System items needing official tools (DISM, Disk Cleanup) are listed
   but refused in-app, with the official command shown instead.
-- **Duplicate file finder**: detects byte-for-byte identical files (size-first,
-  so only genuine candidates are hashed), then lets you keep one copy and
-  recycle the rest.
+- **Duplicate file finder**: detects byte-for-byte identical files using a fast
+  three-stage strategy (group by size, then a cheap content-prefix check, then a
+  full hash only on the survivors), so it doesn't read entire files needlessly.
+  Optionally limit the scan to a chosen folder, watch progress, and cancel it with
+  the main Cancel button. Results let you keep one copy and recycle the rest — and
+  it verifies on disk that other copies still exist before deleting, so it can't
+  remove your last remaining copy if the scan was out of date.
+- **Large & old file finder**: surfaces big files you haven't modified in a long
+  time (size and age thresholds are adjustable) — the forgotten downloads, old
+  videos, and stale backups worth reviewing.
 - **Empty the Recycle Bin** from within the app, with its current size shown and
   a confirmation before emptying.
 
 ### Safety
 Deletion logic lives in a tested engine, not the UI, so its rules can't be
-bypassed. A hard, structurally-matched exclusion list blocks system-critical
-roots (Windows, System32, SysWOW64, WinSxS, Program Files, ProgramData, the
-Users root, Windows.old, drive roots) on any drive. Everything is confirmed, and
-Recycle Bin is the default so mistakes are recoverable.
+bypassed. Convenience features (the duplicate finder, the large-and-old finder,
+and manual deletion) classify every file's location into three trust levels:
+
+- **Protected** — genuinely OS-critical locations (anything inside `C:\Windows`,
+  plus drive roots, the Users root, Windows.old, Recycle Bin storage, and System
+  Volume Information). These can never be deleted through the app.
+- **System (warn)** — installed-program and shared-data locations (Program Files,
+  Program Files (x86), ProgramData). These hold real software *and* removable
+  game/app content, so they're deletable but always behind a clear warning.
+- **Normal** — your own files, deleted with a simple confirmation.
+
+Everything destructive is confirmed, and the Recycle Bin is the default so
+mistakes are recoverable.
 
 ### Running as administrator
 Reclaim starts as a normal user. A **Restart as admin** button (with a clear
@@ -61,10 +89,18 @@ warning) relaunches it elevated so scans can read protected system folders; an
 **Administrator** badge shows when elevated. Elevation is always an explicit
 choice.
 
+### Crash reporting
+If Reclaim hits an unhandled error, it writes a local diagnostic report. On the
+next launch it shows you that report and lets you **send it to the developer**
+(it opens a pre-filled report in your browser for you to review and submit) or
+copy it. Nothing is ever sent automatically, and you see exactly what would be
+shared before sending. Note: hard kills (Task Manager "End task"), power loss,
+and native runtime crashes cannot be captured by any in-process reporter.
+
 ### And a little fun
 Double-click the **RC** logo for a hidden minigame — you'll randomly get one of
-two 8-bit games with chiptune music. Purely cosmetic; it never touches real
-files.
+two 8-bit games with chiptune music and an adjustable volume. Purely cosmetic;
+it never touches real files.
 
 ## Installing
 
@@ -115,41 +151,45 @@ src/
 ├── Reclaim.Core/          Platform-agnostic engine (net8.0)
 │   ├── Scanning/          IScanner, DirectoryScanner, FileSystemNode, FlatList
 │   ├── Treemap/           Squarified treemap layout (pure math, unit tested)
-│   ├── Cleanup/           Rules, analyzer, and the safety-critical DeletionEngine
+│   ├── Cleanup/           Rules, analyzer, the safety-critical DeletionEngine,
+│   │                      and the location-trust classifier
 │   ├── Knowledge/         File-description catalog and location-aware resolver
-│   ├── Duplicates/        Size-first duplicate detector
+│   ├── Duplicates/        Size-first / prefix / full-hash duplicate detector
+│   ├── LargeOld/          Large-and-old file finder
 │   └── Formatting/        ByteSize
 ├── Reclaim.App/           WPF UI (net8.0-windows)
 │   ├── Controls/          TreemapControl (renderer over Core's Squarifier)
 │   ├── Services/          Native shell integration (icons, deletion, Recycle
-│   │                      Bin, elevation, hashing) — the only OS-specific code
+│   │                      Bin, elevation, hashing) and diagnostics — the only
+│   │                      OS-specific code
 │   └── ViewModels/        MVVM
 └── Reclaim.Core.Tests/    Test harness (dotnet run; exit code 0 = pass)
 ```
 
-The scanner parallelizes the shallow directory levels and reads file sizes
-directly from directory enumeration — one enumeration pass per directory, no
-per-file stat calls. `IScanner` exists so a future NTFS MFT scanner can slot in
-beside the directory walker without touching the UI.
+The scanner parallelizes the shallow directory levels and reads file sizes and
+timestamps directly from directory enumeration — one enumeration pass per
+directory, no per-file stat calls. `IScanner` exists so a future NTFS MFT scanner
+can slot in beside the directory walker without touching the UI.
 
 All destructive operations are isolated behind small injected interfaces
 (`IFileRemover`, `IFileHasher`), so the dangerous code is tiny, swappable, and
 testable with fakes. The test harness covers the scanner, treemap math, cleanup
-analysis, deletion-engine safety, file knowledge, and duplicate detection.
+analysis, deletion-engine safety, the location-trust classifier, file knowledge,
+duplicate detection, and the large-and-old finder.
 
 ## Roadmap
 
-Done: scanner + treemap, reclaimable-space detection, cautious deletion, manual
-deletion, file descriptions, duplicate finder, Recycle Bin management, optional
-elevation, self-contained distributable build.
+Done: scanner + folder-coloured treemap, reclaimable-space detection, cautious
+and manual deletion with a location-trust safety model, file descriptions,
+duplicate finder (fast hashing, scope, cancel), large-and-old file finder,
+Recycle Bin management, optional elevation, crash reporting, and a self-contained
+distributable build with automated GitHub releases.
 
 Possible next steps:
 - **Fast NTFS scan**: read the Master File Table directly for whole-volume scans
   in seconds (requires elevation; falls back to the directory walker).
-- **Live/community ruleset**: move cleanup rules to a schema-validated,
-  separately-updatable source so cleanup knowledge can stay current without
-  shipping a new app build.
-- **Large-and-old file finder**, scan history/comparison, and CSV/JSON export.
+- **Scan history / comparison**: save a scan and compare later to see what grew.
+- **Export** a scan to CSV/JSON, and a **file-type breakdown** across the scan.
 
 ## License
 

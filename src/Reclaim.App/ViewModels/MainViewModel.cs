@@ -69,6 +69,10 @@ public sealed class MainViewModel : ViewModelBase
         RestartAsAdminCommand = new RelayCommand(RestartAsAdmin, () => !IsElevated);
         FindDuplicatesCommand = new RelayCommand(FindDuplicates, () => _scannedRoot is not null && !IsScanning);
         EmptyRecycleBinCommand = new RelayCommand(EmptyRecycleBin);
+        ChooseDuplicateScopeCommand = new RelayCommand(
+            () => ChooseDuplicateScopeRequested?.Invoke(),
+            () => _scannedRoot is not null && !IsScanning);
+        FindLargeOldCommand = new RelayCommand(FindLargeOld, () => _scannedRoot is not null && !IsScanning);
         RefreshRecycleBin();
     }
 
@@ -127,9 +131,121 @@ public sealed class MainViewModel : ViewModelBase
     /// the report; the view subscribes and shows the results window.</summary>
     public event Action<Reclaim.Core.Duplicates.DuplicateReport>? DuplicatesReady;
 
+    // ---- Large & old files ----
+    public RelayCommand FindLargeOldCommand { get; private set; } = null!;
+    public event Action<Reclaim.Core.LargeOld.LargeOldReport>? LargeOldReady;
+
+    private int _largeOldMinSizeMb = 100;
+    /// <summary>"Large" threshold in MB (user-adjustable).</summary>
+    public int LargeOldMinSizeMb
+    {
+        get => _largeOldMinSizeMb;
+        set => Set(ref _largeOldMinSizeMb, Math.Max(1, value));
+    }
+
+    private int _largeOldMinMonths = 6;
+    /// <summary>"Old" threshold in months (user-adjustable).</summary>
+    public int LargeOldMinMonths
+    {
+        get => _largeOldMinMonths;
+        set => Set(ref _largeOldMinMonths, Math.Max(1, value));
+    }
+
+    private async void FindLargeOld()
+    {
+        if (_scannedRoot is null)
+            return;
+
+        IsScanning = true;
+        StatusText = "Looking for large, old files…";
+        BeginProgress(indeterminate: true);
+        Reclaim.Core.LargeOld.LargeOldReport report;
+        try
+        {
+            var finder = new Reclaim.Core.LargeOld.LargeOldFinder
+            {
+                MinSizeBytes = (long)LargeOldMinSizeMb * 1024 * 1024,
+                MinAgeDays = LargeOldMinMonths * 30,
+            };
+            var root = _scannedRoot;
+            var now = DateTime.UtcNow;
+            report = await Task.Run(() => finder.Find(root, now));
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Large/old scan failed: {ex.Message}";
+            return;
+        }
+        finally
+        {
+            EndProgress();
+            IsScanning = false;
+        }
+
+        StatusText = report.Files.Count == 0
+            ? "No large, old files matched those thresholds."
+            : $"Found {report.Files.Count} large, old file(s) — {ByteSize.Format(report.TotalBytes)} total.";
+        LargeOldReady?.Invoke(report);
+    }
+
     /// <summary>Called by the duplicates window after it removes files, so the
     /// main views reflect the pruned tree.</summary>
     public void NotifyExternalChange() => RefreshAfterPrune();
+
+    /// <summary>Optional subfolder to limit the duplicate scan to. Null = whole tree.</summary>
+    private FileSystemNode? _duplicateScope;
+
+    public RelayCommand ChooseDuplicateScopeCommand { get; private set; } = null!;
+
+    /// <summary>Raised when the user wants to pick a folder to scope the dup scan;
+    /// the view shows a folder picker and calls SetDuplicateScope with the result.</summary>
+    public event Action? ChooseDuplicateScopeRequested;
+
+    private string _duplicateScopeText = "Scanning the whole scanned tree.";
+    public string DuplicateScopeText
+    {
+        get => _duplicateScopeText;
+        private set => Set(ref _duplicateScopeText, value);
+    }
+
+    /// <summary>Find the scanned node matching a path, so a chosen folder can scope
+    /// the scan to just that subtree. Returns null if it isn't in the scan.</summary>
+    private FileSystemNode? FindNode(FileSystemNode node, string fullPath)
+    {
+        if (string.Equals(node.FullPath.TrimEnd('\\'), fullPath.TrimEnd('\\'),
+                StringComparison.OrdinalIgnoreCase))
+            return node;
+        if (!node.IsDirectory)
+            return null;
+        foreach (var child in node.Children)
+        {
+            var hit = FindNode(child, fullPath);
+            if (hit is not null)
+                return hit;
+        }
+        return null;
+    }
+
+    /// <summary>Set the scan scope to a specific folder (or clear it to whole-tree).</summary>
+    public void SetDuplicateScope(string? folderPath)
+    {
+        if (string.IsNullOrWhiteSpace(folderPath) || _scannedRoot is null)
+        {
+            _duplicateScope = null;
+            DuplicateScopeText = "Scanning the whole scanned tree.";
+            return;
+        }
+
+        var node = FindNode(_scannedRoot, folderPath);
+        if (node is null)
+        {
+            _duplicateScope = null;
+            DuplicateScopeText = "That folder isn't part of the current scan — scanning the whole tree.";
+            return;
+        }
+        _duplicateScope = node;
+        DuplicateScopeText = $"Limiting the search to: {node.FullPath}";
+    }
 
     private async void FindDuplicates()
     {
@@ -139,11 +255,13 @@ public sealed class MainViewModel : ViewModelBase
         IsScanning = true;
         StatusText = "Analyzing files for duplicates…";
         BeginProgress(indeterminate: true); // until the hash-total is known
+        _cts = new CancellationTokenSource();
+        var token = _cts.Token;
         Reclaim.Core.Duplicates.DuplicateReport report;
         try
         {
             var finder = new Reclaim.Core.Duplicates.DuplicateFinder(new Sha256FileHasher());
-            var root = _scannedRoot;
+            var root = _duplicateScope ?? _scannedRoot;
 
             // Marshal progress reports onto the UI thread.
             var progress = new Progress<(int done, int total)>(p =>
@@ -154,7 +272,12 @@ public sealed class MainViewModel : ViewModelBase
                     : "Analyzing files for duplicates…";
             });
 
-            report = await Task.Run(() => finder.Find(root, progress));
+            report = await Task.Run(() => finder.Find(root, progress, token), token);
+        }
+        catch (OperationCanceledException)
+        {
+            StatusText = "Duplicate scan canceled.";
+            return;
         }
         catch (Exception ex)
         {
@@ -165,6 +288,8 @@ public sealed class MainViewModel : ViewModelBase
         {
             EndProgress();
             IsScanning = false;
+            _cts?.Dispose();
+            _cts = null;
         }
 
         StatusText = report.Groups.Count == 0
@@ -464,6 +589,8 @@ public sealed class MainViewModel : ViewModelBase
                 CancelCommand.RaiseCanExecuteChanged();
                 FindDuplicatesCommand.RaiseCanExecuteChanged();
                 CleanSelectedCommand.RaiseCanExecuteChanged();
+                ChooseDuplicateScopeCommand.RaiseCanExecuteChanged();
+                FindLargeOldCommand.RaiseCanExecuteChanged();
             }
         }
     }
@@ -656,14 +783,36 @@ public sealed class MainViewModel : ViewModelBase
     /// Files are removed outright; for folders, callers choose contents-only or
     /// the whole folder. Explicit, single-target, confirmed; refuses protected
     /// roots. Recycle Bin unless the user opted into permanent.</summary>
+    /// <summary>Stricter than the engine's root-only guard: blocks deletion of
+    /// files anywhere inside protected system trees, and warns on system locations.
+    /// Returns true if deletion may proceed. Used by manual delete + duplicates.</summary>
+    private bool PassesLocationGuard(FileSystemNode node)
+    {
+        var trust = LocationTrustClassifier.Classify(node.FullPath);
+        if (trust == LocationTrust.Protected)
+        {
+            ShowProtected(node.Name);
+            return false;
+        }
+        if (trust == LocationTrust.System)
+        {
+            var warn = MessageBox.Show(
+                "This is in a system location:\n\n" + node.FullPath +
+                "\n\nIt may be needed by Windows or an installed program. Delete it anyway?",
+                "System location — are you sure?", MessageBoxButton.OKCancel, MessageBoxImage.Warning);
+            if (warn != MessageBoxResult.OK)
+                return false;
+        }
+        return true;
+    }
+
     public async void DeleteFileManually(FileSystemNode? node)
     {
         if (node is null || node.IsDirectory)
             return;
 
-        if (!DeletionEngine.CanDeleteFolder(node.FullPath)) // same protected-path guard
+        if (!DeletionEngine.CanDeleteFolder(node.FullPath) || !PassesLocationGuard(node))
         {
-            ShowProtected(node.Name);
             return;
         }
 
@@ -680,11 +829,8 @@ public sealed class MainViewModel : ViewModelBase
     {
         if (node is null || !node.IsDirectory)
             return;
-        if (!DeletionEngine.CanDeleteFolder(node.FullPath))
-        {
-            ShowProtected(node.Name);
+        if (!DeletionEngine.CanDeleteFolder(node.FullPath) || !PassesLocationGuard(node))
             return;
-        }
         if (node.Children.Count == 0)
         {
             StatusText = $"\"{node.Name}\" is already empty.";
@@ -706,11 +852,8 @@ public sealed class MainViewModel : ViewModelBase
     {
         if (node is null || !node.IsDirectory)
             return;
-        if (!DeletionEngine.CanDeleteFolder(node.FullPath))
-        {
-            ShowProtected(node.Name);
+        if (!DeletionEngine.CanDeleteFolder(node.FullPath) || !PassesLocationGuard(node))
             return;
-        }
 
         if (!ConfirmDelete(
                 $"Delete this folder and everything in it?\n\n" +

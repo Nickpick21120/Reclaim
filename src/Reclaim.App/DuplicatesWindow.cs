@@ -1,3 +1,4 @@
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -52,13 +53,6 @@ public sealed class DuplicatesWindow : Window
         UpdateSummary();
         Grid.SetRow(_summary, 0);
 
-        var scroll = new ScrollViewer
-        {
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            Content = _list,
-        };
-        Grid.SetRow(scroll, 1);
-
         if (_report.Groups.Count == 0)
         {
             _list.Children.Add(new TextBlock
@@ -69,9 +63,31 @@ public sealed class DuplicatesWindow : Window
         }
         else
         {
-            foreach (var group in _report.Groups)
-                _list.Children.Add(BuildGroupCard(group));
+            // The report is already capped by the finder, but cap again for the UI
+            // as defense-in-depth so we never build a pathological number of cards.
+            const int uiMax = 200;
+            var shown = Math.Min(_report.Groups.Count, uiMax);
+            for (var i = 0; i < shown; i++)
+                _list.Children.Add(BuildGroupCard(_report.Groups[i]));
+
+            if (_report.Groups.Count > uiMax)
+            {
+                _list.Children.Add(new TextBlock
+                {
+                    Text = $"Showing the {uiMax} largest groups of {_report.TotalGroupsFound}. "
+                         + "Clean these first, then scan again to see more.",
+                    Foreground = dim, FontSize = 11.5, Margin = new Thickness(2, 8, 0, 0),
+                    TextWrapping = TextWrapping.Wrap,
+                });
+            }
         }
+
+        var scroll = new ScrollViewer
+        {
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            Content = _list,
+        };
+        Grid.SetRow(scroll, 1);
 
         root.Children.Add(_summary);
         root.Children.Add(scroll);
@@ -103,13 +119,13 @@ public sealed class DuplicatesWindow : Window
             Margin = new Thickness(0, 0, 0, 6),
         });
 
-        // One row per file with a Delete button (disabled for the first/kept copy
-        // by convention, but the user may delete any — at least one is implicitly
-        // kept since we stop offering once only one remains).
         foreach (var file in group.Files)
         {
+            var trust = LocationTrustClassifier.Classify(file.FullPath);
+
             var row = new Grid { Margin = new Thickness(0, 2, 0, 2) };
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
             var pathText = new TextBlock
@@ -120,19 +136,51 @@ public sealed class DuplicatesWindow : Window
                 VerticalAlignment = VerticalAlignment.Center,
             };
             Grid.SetColumn(pathText, 0);
+            row.Children.Add(pathText);
+
+            // A trust badge for system/protected locations so the user is never
+            // unaware of what they're about to touch.
+            if (trust != LocationTrust.Normal)
+            {
+                var isProtected = trust == LocationTrust.Protected;
+                var badge = new Border
+                {
+                    CornerRadius = new CornerRadius(3),
+                    Padding = new Thickness(6, 1, 6, 1),
+                    Margin = new Thickness(8, 0, 0, 0),
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Background = new SolidColorBrush(isProtected
+                        ? Color.FromRgb(0xC4, 0x2B, 0x1C)   // red: protected
+                        : Color.FromRgb(0xD9, 0xA4, 0x41)), // gold: warn
+                    Child = new TextBlock
+                    {
+                        Text = isProtected ? "System — protected" : "System location",
+                        FontSize = 10, Foreground = Brushes.White,
+                    },
+                };
+                Grid.SetColumn(badge, 1);
+                row.Children.Add(badge);
+            }
 
             var del = new Button
             {
-                Content = "Delete copy",
+                Content = trust == LocationTrust.Protected ? "Protected" : "Delete copy",
                 Padding = new Thickness(8, 2, 8, 2),
                 Margin = new Thickness(8, 0, 0, 0),
                 Tag = file,
+                // Hard-block deletion of protected system files from here.
+                IsEnabled = trust != LocationTrust.Protected,
+                ToolTip = trust == LocationTrust.Protected
+                    ? "This file is in a protected system location and can't be deleted here."
+                    : trust == LocationTrust.System
+                        ? "This is in a system location — make sure it isn't needed before deleting."
+                        : null,
             };
-            del.Click += (s, _) => DeleteCopy((FileSystemNode)((Button)s).Tag, stack, group, del);
-            Grid.SetColumn(del, 1);
-
-            row.Children.Add(pathText);
+            if (trust != LocationTrust.Protected)
+                del.Click += (s, _) => DeleteCopy((FileSystemNode)((Button)s).Tag, stack, group, del, trust);
+            Grid.SetColumn(del, 2);
             row.Children.Add(del);
+
             stack.Children.Add(row);
         }
 
@@ -146,29 +194,90 @@ public sealed class DuplicatesWindow : Window
         };
     }
 
-    private void DeleteCopy(FileSystemNode file, StackPanel groupStack, DuplicateGroup group, Button btn)
+    private void DeleteCopy(FileSystemNode file, StackPanel groupStack, DuplicateGroup group, Button btn,
+        LocationTrust trust)
     {
-        // Count remaining (non-deleted) rows; never let the user remove the last copy.
-        var remaining = groupStack.Children.OfType<Grid>().Count(g => g.IsEnabled);
-        if (remaining <= 1)
+        // GROUND-TRUTH SAFETY CHECK: verify, against the real filesystem right now,
+        // that at least one OTHER copy in this group still exists. The scan tree can
+        // be stale (files moved/deleted/cleaned since the scan), so counting UI rows
+        // isn't enough — we must confirm on disk before this destructive act, or we
+        // risk deleting the only surviving copy.
+        var file1Exists = SafeExists(file.FullPath);
+        var otherRealCopies = group.Files
+            .Where(f => !PathsEqual(f.FullPath, file.FullPath))
+            .Count(f => SafeExists(f.FullPath));
+
+        if (otherRealCopies == 0)
         {
-            MessageBox.Show("This is the last remaining copy — keeping it.",
-                "Reclaim", MessageBoxButton.OK, MessageBoxImage.Information);
+            MessageBox.Show(
+                file1Exists
+                    ? "The other copies in this group no longer exist on disk, so this is now the only copy left — keeping it.\n\n" +
+                      "(The scan may be out of date. Re-scan to refresh.)"
+                    : "This file no longer exists on disk — it may have already been moved or deleted.\n\n" +
+                      "Re-scan to refresh the list.",
+                "Reclaim — nothing safe to delete", MessageBoxButton.OK, MessageBoxImage.Warning);
+            // Reflect reality in the row.
+            if (btn.Parent is Grid r)
+            {
+                r.IsEnabled = false;
+                r.Opacity = 0.4;
+                btn.Content = file1Exists ? "Only copy" : "Missing";
+            }
             return;
         }
 
-        if (!DeletionEngine.CanDeleteFolder(file.FullPath))
+        // Defense in depth: never delete a protected-location file here, even if a
+        // button somehow got through.
+        if (trust == LocationTrust.Protected ||
+            LocationTrustClassifier.Classify(file.FullPath) == LocationTrust.Protected ||
+            !DeletionEngine.CanDeleteFolder(file.FullPath))
         {
-            MessageBox.Show("That file is in a protected location and can't be removed here.",
+            MessageBox.Show("That file is in a protected system location and can't be removed here.",
                 "Reclaim", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
 
-        var ok = MessageBox.Show(
-            $"Send this copy to the Recycle Bin?\n\n{file.FullPath}",
-            "Delete duplicate", MessageBoxButton.OKCancel, MessageBoxImage.Question);
-        if (ok != MessageBoxResult.OK)
+        // System-location files get a sterner, explicit warning — duplicates here
+        // are usually deliberate (shared runtimes/components).
+        if (trust == LocationTrust.System)
+        {
+            var warn = MessageBox.Show(
+                "This file is in a system location:\n\n" + file.FullPath +
+                "\n\nCopies here are often kept on purpose by Windows or an installed program. " +
+                "Deleting it could affect that software. Are you sure you want to send it to the Recycle Bin?",
+                "System file — are you sure?", MessageBoxButton.OKCancel, MessageBoxImage.Warning);
+            if (warn != MessageBoxResult.OK)
+                return;
+        }
+        else
+        {
+            var ok = MessageBox.Show(
+                $"Send this copy to the Recycle Bin?\n\n{file.FullPath}",
+                "Delete duplicate", MessageBoxButton.OKCancel, MessageBoxImage.Question);
+            if (ok != MessageBoxResult.OK)
+                return;
+        }
+
+        // Final ground-truth check immediately before deleting: the target must
+        // still exist (it could have vanished since the list was built), and at
+        // least one other real copy must remain (re-checked, in case disk changed
+        // during the confirmation dialog).
+        if (!SafeExists(file.FullPath))
+        {
+            MessageBox.Show("That file no longer exists on disk. Re-scan to refresh the list.",
+                "Reclaim", MessageBoxButton.OK, MessageBoxImage.Warning);
+            if (btn.Parent is Grid gm) { gm.IsEnabled = false; gm.Opacity = 0.4; btn.Content = "Missing"; }
             return;
+        }
+        var stillOthers = group.Files
+            .Where(f => !PathsEqual(f.FullPath, file.FullPath))
+            .Count(f => SafeExists(f.FullPath));
+        if (stillOthers == 0)
+        {
+            MessageBox.Show("This is now the only remaining copy — keeping it.",
+                "Reclaim", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
 
         try
         {
@@ -198,4 +307,14 @@ public sealed class DuplicatesWindow : Window
                 MessageBoxButton.OK, MessageBoxImage.Warning);
         }
     }
+
+    /// <summary>Whether a file currently exists on disk, never throwing.</summary>
+    private static bool SafeExists(string path)
+    {
+        try { return File.Exists(path); }
+        catch { return false; }
+    }
+
+    private static bool PathsEqual(string a, string b) =>
+        string.Equals(a?.TrimEnd('\\'), b?.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
 }

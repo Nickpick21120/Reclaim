@@ -591,11 +591,95 @@ Directory.Delete(root, recursive: true);
     Check(rpt3.Groups.All(g => g.Files.All(f => f.Name != "a.txt")),
         "dup: unreadable file is skipped, others still processed");
 
+    // Prefix pre-filter: same-size files differing within the prefix must NOT be
+    // fully hashed. Use a small PrefixBytes so the markers differ inside it.
+    contents[Path.Join(dd, "a.txt")] = "AAA"; // restore
+    hashCalls.Clear();
+    var prefixFinder = new DuplicateFinder(hasher) { MinFileSizeBytes = 1, PrefixBytes = 1 };
+    // a/b/c are all size 1000; a,b="AAA", c="CCC". With PrefixBytes=1, prefix of
+    // "AAA" is "A", of "CCC" is "C" — c is separated by prefix and never full-hashed;
+    // a,b share prefix "A" AND size > PrefixBytes, so they get a full hash.
+    var rpt4 = prefixFinder.Find(tree);
+    Check(!hashCalls.Contains(Path.Join(dd, "c.txt")),
+        "dup: file differing within the prefix is never fully hashed");
+    Check(rpt4.Groups.Any(g => g.Files.Count == 2 && g.FileSizeBytes == 1000),
+        "dup: prefix-colliding files are still confirmed by full hash");
+
+    // Cancellation: a token cancelled before the scan makes Find throw promptly.
+    {
+        using var cts = new System.Threading.CancellationTokenSource();
+        cts.Cancel();
+        var canceledFinder = new DuplicateFinder(hasher) { MinFileSizeBytes = 1 };
+        var threw = false;
+        try { canceledFinder.Find(tree, null, cts.Token); }
+        catch (OperationCanceledException) { threw = true; }
+        Check(threw, "dup: a cancelled token stops the scan with OperationCanceledException");
+    }
+
     Directory.Delete(dd, recursive: true);
 }
 
-Console.WriteLine();
-Console.WriteLine(failures == 0 ? "All tests passed." : $"{failures} test(s) FAILED.");
+// ---- location trust classifier ----
+{
+    // The exact case from the bug report: boot.sdi under C:\Windows must be Protected.
+    Check(LocationTrustClassifier.Classify(@"C:\Windows\Boot\DVD\EFI\boot.sdi") == LocationTrust.Protected,
+        "trust: Windows system file is Protected (the boot.sdi case)");
+    Check(LocationTrustClassifier.Classify(@"C:\Windows\System32\drivers\x.sys") == LocationTrust.Protected,
+        "trust: System32 is Protected");
+    // Program Files is now System-tier (warn), not hard-protected, so deletable
+    // game/app content there isn't falsely locked.
+    Check(LocationTrustClassifier.Classify(@"C:\Program Files\App\shared.dll") == LocationTrust.System,
+        "trust: Program Files is System-tier (warn), not Protected");
+    // The exact screenshot case: a Steam Workshop game file must be deletable (warn).
+    Check(LocationTrustClassifier.Classify(
+            @"C:\Program Files (x86)\Steam\steamapps\workshop\content\431960\Cyberpunk_2077_4K.mp4")
+            == LocationTrust.System,
+        "trust: Steam Workshop game file is System-tier (warn), not Protected");
+    // But Windows stays hard-blocked.
+    Check(LocationTrustClassifier.Classify(@"C:\Windows\Boot\DVD\EFI\boot.sdi") == LocationTrust.Protected,
+        "trust: Windows system file stays Protected");
+    // Ordinary user files are Normal.
+    Check(LocationTrustClassifier.Classify(@"C:\Users\me\Downloads\setup.exe") == LocationTrust.Normal,
+        "trust: user Downloads is Normal");
+    Check(LocationTrustClassifier.Classify(@"D:\Photos\2023\pic.jpg") == LocationTrust.Normal,
+        "trust: user data on another drive is Normal");
+    // Empty/garbage path is treated as untouchable.
+    Check(LocationTrustClassifier.Classify("") == LocationTrust.Protected,
+        "trust: empty path is Protected (fail safe)");
+}
+
+// ---- large-and-old file finder ----
+{
+    var lo = Path.Join(Path.GetTempPath(), "reclaim-lo-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(lo);
+
+    void MakeAged(string rel, int sizeBytes, int ageDays)
+    {
+        var full = Path.Join(lo, rel);
+        Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+        File.WriteAllBytes(full, new byte[sizeBytes]);
+        File.SetLastWriteTimeUtc(full, DateTime.UtcNow.AddDays(-ageDays));
+    }
+    MakeAged("bigold.bin", 2_000_000, 400);
+    MakeAged("bignew.bin", 2_000_000, 5);
+    MakeAged("smallold.bin", 1_000, 400);
+    MakeAged(Path.Join("sub", "deepbigold.bin"), 3_000_000, 400);
+
+    var loTree = (await new DirectoryScanner().ScanAsync(lo, new ScanOptions())).Root;
+    var finder = new Reclaim.Core.LargeOld.LargeOldFinder { MinSizeBytes = 1_500_000, MinAgeDays = 180 };
+    var rep = finder.Find(loTree, DateTime.UtcNow);
+
+    Check(rep.Files.Count == 2, $"large-old: found the two big+old files (got {rep.Files.Count})");
+    Check(rep.Files.All(f => f.Node.Name != "bignew.bin"), "large-old: recent big file excluded");
+    Check(rep.Files.All(f => f.Node.Name != "smallold.bin"), "large-old: small old file excluded");
+    Check(rep.Files[0].Node.Name == "deepbigold.bin", "large-old: largest sorts first (and recurses)");
+    Check(rep.Files[0].AgeDays >= 180, "large-old: age computed in days");
+    Check(rep.TotalBytes == 5_000_000, "large-old: total bytes summed");
+
+    Directory.Delete(lo, recursive: true);
+}
+
+Console.WriteLine();Console.WriteLine(failures == 0 ? "All tests passed." : $"{failures} test(s) FAILED.");
 return failures == 0 ? 0 : 1;
 
 // Fake remover that reports any path containing a marker as "in use", the rest
@@ -633,5 +717,15 @@ sealed class MapHasher(
         if (content == "BOOM_THROW")
             throw new System.IO.IOException("unreadable");
         return content; // content string doubles as its own hash for the test
+    }
+
+    public string HashPrefix(string fullPath, int maxBytes)
+    {
+        var content = contents[fullPath];
+        if (content == "BOOM_THROW")
+            throw new System.IO.IOException("unreadable");
+        // Prefix hash = first maxBytes chars of the content marker, so files that
+        // differ only after the prefix still collide here and require a full hash.
+        return content.Length <= maxBytes ? content : content[..maxBytes];
     }
 }

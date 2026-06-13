@@ -11,10 +11,18 @@ public static class RecycleBin
     /// <summary>Current Recycle Bin contents across all drives.</summary>
     public static (long Bytes, long Items) Query()
     {
-        var info = new SHQUERYRBINFO { cbSize = Marshal.SizeOf<SHQUERYRBINFO>() };
-        // null root = all drives
-        var hr = SHQueryRecycleBin(null, ref info);
-        return hr == 0 ? (info.i64Size, info.i64NumItems) : (0, 0);
+        try
+        {
+            var info = new SHQUERYRBINFO { cbSize = Marshal.SizeOf<SHQUERYRBINFO>() };
+            // null root = all drives
+            var hr = SHQueryRecycleBin(null, ref info);
+            return hr == 0 ? (info.i64Size, info.i64NumItems) : (0, 0);
+        }
+        catch
+        {
+            // Never let a Recycle Bin query failure break the caller (e.g. startup).
+            return (0, 0);
+        }
     }
 
     /// <summary>Permanently empties the Recycle Bin (all drives). Returns true on
@@ -32,7 +40,7 @@ public static class RecycleBin
         return hr == 0;
     }
 
-    [StructLayout(LayoutKind.Sequential)]
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
     private struct SHQUERYRBINFO
     {
         public int cbSize;

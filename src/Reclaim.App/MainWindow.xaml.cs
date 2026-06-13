@@ -25,6 +25,36 @@ public partial class MainWindow : Window
             var win = new DuplicatesWindow(report, () => Vm.NotifyExternalChange()) { Owner = this };
             win.Show();
         };
+        Vm.ChooseDuplicateScopeRequested += () =>
+        {
+            var dialog = new OpenFolderDialog { Title = "Choose a folder to limit the duplicate scan" };
+            if (dialog.ShowDialog(this) == true)
+                Vm.SetDuplicateScope(dialog.FolderName);
+        };
+        Vm.LargeOldReady += report =>
+        {
+            var win = new LargeOldWindow(report, () => Vm.NotifyExternalChange()) { Owner = this };
+            win.Show();
+        };
+
+        // Crash detection: a crash report file exists only when the previous run
+        // caught an unhandled exception. That's the reliable signal — far more so
+        // than an exit-marker, which false-positives whenever the exit handler
+        // doesn't run (debugger stop, host kill, etc.).
+        Loaded += (_, _) => CheckForPreviousCrash();
+    }
+
+    private void CheckForPreviousCrash()
+    {
+        var report = Services.Diagnostics.ReadLastCrash();
+        if (report is null)
+            return; // no captured crash last run — normal launch
+
+        // Clear first so we only ever prompt once for a given crash.
+        Services.Diagnostics.ClearLastCrash();
+
+        var win = new CrashReportWindow(report) { Owner = this };
+        win.ShowDialog();
     }
 
     private void OnMinimize(object sender, RoutedEventArgs e) =>
@@ -184,6 +214,34 @@ public partial class MainWindow : Window
     {
         if (e.ClickCount != 2)
             return;
+
+        // Hidden developer trigger: Ctrl+Shift+double-click forces a test crash so
+        // the crash-report flow can be verified end to end. Gated behind a modifier
+        // combo a normal user won't hit, plus a confirmation, so it's safe to ship.
+        if ((Keyboard.Modifiers & (ModifierKeys.Control | ModifierKeys.Shift))
+            == (ModifierKeys.Control | ModifierKeys.Shift))
+        {
+            var confirm = MessageBox.Show(
+                "Developer test: simulate an unhandled-exception crash now?\n\n" +
+                "This verifies the crash-report flow for app errors (unhandled exceptions). " +
+                "The app will close; on next launch you should see the crash report dialog.\n\n" +
+                "Note: this is the kind of crash Reclaim can detect. Hard kills (Task Manager " +
+                "\u201cEnd task\u201d), power loss, or native runtime crashes cannot be captured by " +
+                "any in-process reporter and won't produce a report.",
+                "Trigger test crash", MessageBoxButton.OKCancel, MessageBoxImage.Warning);
+            if (confirm == MessageBoxResult.OK)
+            {
+                // Write a crash report just like a real fatal error would, then shut
+                // down — so the next launch exercises the report dialog. (Throwing
+                // here would be caught by the dispatcher handler, which deliberately
+                // keeps the app alive, so it wouldn't reproduce a fatal-crash launch.)
+                Services.Diagnostics.WriteCrash("Manual test",
+                    new InvalidOperationException(
+                        "Deliberate test crash triggered from the RC logo (Ctrl+Shift+double-click)."));
+                Application.Current.Shutdown();
+            }
+            return;
+        }
 
         if (_miniGame is { IsLoaded: true })
         {

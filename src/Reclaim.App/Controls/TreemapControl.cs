@@ -1,4 +1,3 @@
-using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -40,6 +39,11 @@ public sealed class TreemapControl : FrameworkElement
         public List<LayoutNode> Children { get; } = [];
         /// <summary>For FolderHeaders mode: the strip at the top of this dir's rect.</summary>
         public RectD? HeaderRect { get; set; }
+        /// <summary>Hue (0–360) of the scan-root top-level folder this block belongs
+        /// to; inherited by all descendants so a whole tree reads as one color.</summary>
+        public double Hue { get; set; }
+        /// <summary>Depth below the colored root branch, for subtle lightness steps.</summary>
+        public int Depth { get; set; }
     }
 
     private const double HeaderHeight = 15.0;
@@ -49,7 +53,6 @@ public sealed class TreemapControl : FrameworkElement
     private static readonly Pen BorderPen = MakeFrozenPen(Color.FromArgb(160, 0, 0, 0), 1.0);
     private static readonly Brush EmptyBrush = MakeFrozenBrush(Color.FromRgb(0x0B, 0x0D, 0x12));
     private static readonly Brush HintBrush = MakeFrozenBrush(Color.FromRgb(0x7A, 0x83, 0x98));
-    private static readonly SolidColorBrush DirBrush = MakeFrozenBrush(Color.FromRgb(0x1A, 0x22, 0x36));
     private static readonly Brush HeaderBrush = MakeFrozenBrush(Color.FromArgb(220, 0x10, 0x16, 0x24));
     private static readonly Brush LabelBrush = MakeFrozenBrush(Color.FromArgb(235, 0xE6, 0xEC, 0xF7));
     private static readonly Typeface LabelTypeface = new("Segoe UI");
@@ -151,9 +154,15 @@ public sealed class TreemapControl : FrameworkElement
     }
 
     private static LayoutNode BuildLayout(
-        FileSystemNode node, RectD rect, long minFileBytes, TreemapLabelMode labelMode)
+        FileSystemNode node, RectD rect, long minFileBytes, TreemapLabelMode labelMode,
+        int depth = 0)
     {
-        var layout = new LayoutNode { Node = node, Rect = rect };
+        // Hue is anchored to the scan-root top-level folder this node descends
+        // from, computed from that folder's identity — so it's identical whether
+        // you're viewing the whole drive or drilled deep inside, and never resets.
+        var nodeHue = HueForBranch(node);
+
+        var layout = new LayoutNode { Node = node, Rect = rect, Hue = nodeHue, Depth = depth };
 
         if (!node.IsDirectory || rect.Width < MinRecurse || rect.Height < MinRecurse)
             return layout;
@@ -192,10 +201,36 @@ public sealed class TreemapControl : FrameworkElement
         {
             if (rects[i].Width < MinVisible || rects[i].Height < MinVisible)
                 continue;
-            layout.Children.Add(BuildLayout(visible[i].Node, rects[i], minFileBytes, labelMode));
+            layout.Children.Add(
+                BuildLayout(visible[i].Node, rects[i], minFileBytes, labelMode, depth + 1));
         }
 
         return layout;
+    }
+
+    /// <summary>
+    /// The stable hue for the branch a node belongs to. Walks up to the top-level
+    /// folder (the highest ancestor below the scan root) and hashes its name, so
+    /// the same top-level folder always maps to the same color regardless of how
+    /// far the view is drilled in.
+    /// </summary>
+    private static double HueForBranch(FileSystemNode node)
+    {
+        // Find the topmost ancestor: the node whose parent has no parent (its
+        // parent is the scan root). If the node has no parent, it IS the root.
+        var current = node;
+        while (current.Parent is { Parent: not null })
+            current = current.Parent;
+
+        // current is now the top-level folder under the scan root (or the node
+        // itself if shallow). Hash its name to a hue on the wheel.
+        var name = current.Name;
+        var hash = 0;
+        foreach (var ch in name)
+            hash = hash * 31 + char.ToLowerInvariant(ch);
+        // Spread around the wheel; the golden-angle-ish multiplier reduces the
+        // chance that two sibling folders land on near-identical hues.
+        return Math.Abs(hash * 137) % 360;
     }
 
     // ---- rendering ------------------------------------------------------------
@@ -206,7 +241,7 @@ public sealed class TreemapControl : FrameworkElement
         {
             // Leaf: a file, or a directory too small to subdivide at this zoom.
             var r = layout.Rect;
-            dc.DrawRectangle(BrushFor(layout.Node), BorderPen,
+            dc.DrawRectangle(BrushFor(layout), BorderPen,
                 new Rect(r.X, r.Y, r.Width, r.Height));
 
             if (LabelMode == TreemapLabelMode.BigBlocks)
@@ -262,23 +297,26 @@ public sealed class TreemapControl : FrameworkElement
         return ft;
     }
 
-    private SolidColorBrush BrushFor(FileSystemNode node)
+    private SolidColorBrush BrushFor(LayoutNode layout)
     {
-        if (node.IsDirectory)
-            return DirBrush;
+        // Color by the scan-root top-level folder this block belongs to: one hue
+        // per root branch, inherited by all descendants, so a whole tree reads as
+        // a single color family. Depth nudges lightness so nested structure stays
+        // visible without losing the folder identity.
+        var hue = layout.Hue < 0 ? 210 : layout.Hue; // fallback if uncolored
 
-        var key = Path.GetExtension(node.Name);
-        if (string.IsNullOrEmpty(key))
-            key = "<none>";
-
+        // Cache by a coarse hue+depth key so we don't allocate a brush per block.
+        var bucket = (int)Math.Round(hue);
+        var depthStep = Math.Min(layout.Depth, 6);
+        var key = $"{bucket}:{depthStep}";
         if (_brushCache.TryGetValue(key, out var cached))
             return cached;
 
-        // Deterministic hue per extension.
-        var hash = 0;
-        foreach (var ch in key)
-            hash = hash * 31 + char.ToLowerInvariant(ch);
-        var brush = MakeFrozenBrush(HsvToRgb(Math.Abs(hash) % 360, 0.45, 0.62));
+        // Deeper blocks get slightly lighter & a touch less saturated, so a folder
+        // reads as one hue that gently brightens with depth.
+        var sat = Math.Max(0.30, 0.58 - depthStep * 0.03);
+        var val = Math.Min(0.82, 0.50 + depthStep * 0.055);
+        var brush = MakeFrozenBrush(HsvToRgb(hue, sat, val));
 
         _brushCache[key] = brush;
         return brush;

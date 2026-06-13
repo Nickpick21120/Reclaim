@@ -13,7 +13,7 @@ public sealed class DirectoryScanner : IScanner
 {
     // Snapshot of one directory entry. FileSystemEntry is a ref struct and
     // cannot be stored, so we project the few fields we need into this.
-    private readonly record struct Entry(string Name, bool IsDirectory, long Size, FileAttributes Attributes);
+    private readonly record struct Entry(string Name, bool IsDirectory, long Size, FileAttributes Attributes, DateTime LastWriteUtc);
 
     private sealed class Counters
     {
@@ -101,6 +101,7 @@ public sealed class DirectoryScanner : IScanner
                 FullPath = Path.Join(node.FullPath, entry.Name),
                 IsDirectory = entry.IsDirectory,
                 Parent = node,
+                LastWriteUtc = entry.IsDirectory ? default : entry.LastWriteUtc,
             };
 
             if (entry.IsDirectory)
@@ -169,7 +170,8 @@ public sealed class DirectoryScanner : IScanner
                 entry.FileName.ToString(),
                 entry.IsDirectory,
                 entry.IsDirectory ? 0 : entry.Length,
-                entry.Attributes),
+                entry.Attributes,
+                entry.LastWriteTimeUtc.UtcDateTime),
             new EnumerationOptions
             {
                 IgnoreInaccessible = false,
