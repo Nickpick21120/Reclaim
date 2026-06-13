@@ -112,6 +112,15 @@ Because the app isn't code-signed, the first run may show a Windows SmartScreen
 warning ("Windows protected your PC"). Click **More info → Run anyway**. This is
 normal for unsigned applications.
 
+### Code signing
+
+Reclaim is applying to the [SignPath Foundation](https://signpath.org)'s free
+code-signing program for open-source projects. Once approved, official release
+builds will be signed automatically in CI, which reduces the "unknown publisher"
+warning over time. See [CODE_SIGNING.md](CODE_SIGNING.md) for the full policy.
+
+> Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
 ## Building from source
 
 Requires the [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) on Windows.

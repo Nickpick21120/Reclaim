@@ -14,6 +14,11 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: write   # needed to create the release and upload the exe
+    env:
+      # Exposed at job level so the signing step's `if:` guard can read it.
+      # Empty until you add the SIGNPATH_API_TOKEN repo secret post-approval,
+      # which keeps the signing step skipped and current builds unaffected.
+      SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
 
     steps:
       - name: Check out the code
@@ -35,15 +40,46 @@ jobs:
           -o publish
 
       - name: Upload exe as a build artifact
+        id: upload-unsigned
         uses: actions/upload-artifact@v4
         with:
           name: Reclaim-win-x64
           path: publish/Reclaim.exe
 
-      # When triggered by a tag, also create a Release with the exe attached.
+      # ------------------------------------------------------------------
+      # CODE SIGNING (SignPath Foundation) — STAGED, NOT YET ACTIVE.
+      #
+      # This whole step stays disabled until the SignPath OSS application is
+      # approved AND the repository has a secret named SIGNPATH_API_TOKEN.
+      # The `if:` guard means: until that secret exists, this step is skipped
+      # entirely, so current unsigned builds keep working unchanged.
+      #
+      # After approval, fill in the three vars below (from your SignPath
+      # dashboard) and add the SIGNPATH_API_TOKEN secret. No other change needed.
+      #   - organization-id:        your SignPath organization GUID
+      #   - project-slug:           the SignPath project slug (e.g. "reclaim")
+      #   - signing-policy-slug:    usually "release-signing" or "test-signing"
+      #
+      # Docs: https://about.signpath.io/documentation/build-system-integrations/github-actions
+      # ------------------------------------------------------------------
+      - name: Sign with SignPath
+        id: signpath
+        if: ${{ env.SIGNPATH_API_TOKEN != '' && startsWith(github.ref, 'refs/tags/v') }}
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: 'REPLACE_WITH_SIGNPATH_ORG_ID'
+          project-slug: 'reclaim'
+          signing-policy-slug: 'release-signing'
+          github-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: 'signed'
+
+      # When triggered by a tag, create a Release. It attaches the SIGNED exe if
+      # signing ran, otherwise the unsigned exe — so releases work either way.
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: publish/Reclaim.exe
+          files: ${{ steps.signpath.outcome == 'success' && 'signed/Reclaim.exe' || 'publish/Reclaim.exe' }}
           generate_release_notes: true
