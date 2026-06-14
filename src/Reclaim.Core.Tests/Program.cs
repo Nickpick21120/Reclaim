@@ -707,6 +707,174 @@ Directory.Delete(root, recursive: true);
     Directory.Delete(ex, recursive: true);
 }
 
+// ---- MFT tree builder (pure path reconstruction, no real volume needed) ----
+{
+    const ulong ROOT = 5; // NTFS root directory FRN
+    // Build a synthetic volume:  C:\  ->  Users(10)  ->  me(11)  ->  a.txt(12, 100 bytes)
+    //                                  \-> Windows(20) -> sys.dll(21, 200 bytes)
+    //                            plus an orphan(99) whose parent FRN doesn't exist.
+    var when = new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+    var records = new List<Reclaim.Core.Scanning.MftRecord>
+    {
+        new(10, ROOT, "Users", true, 0, default),
+        new(11, 10, "me", true, 0, default),
+        new(12, 11, "a.txt", false, 100, when),
+        new(20, ROOT, "Windows", true, 0, default),
+        new(21, 20, "sys.dll", false, 200, when),
+        new(30, ROOT, "$MFT", false, 999, when),   // metafile — must be skipped
+        new(99, 12345, "orphan.bin", false, 50, when), // missing parent → attach to root
+    };
+
+    var tree = Reclaim.Core.Scanning.MftTreeBuilder.Build(records, ROOT, "C:");
+
+    FileSystemNode? Find(FileSystemNode n, string path) =>
+        string.Equals(n.FullPath, path, StringComparison.OrdinalIgnoreCase) ? n
+        : n.Children.Select(c => Find(c, path)).FirstOrDefault(r => r is not null);
+
+    Check(Find(tree, @"C:\Users\me\a.txt") is not null, "mft: nested path reconstructed");
+    Check(Find(tree, @"C:\Windows\sys.dll") is not null, "mft: second branch reconstructed");
+    Check(Find(tree, @"C:\Users\me\a.txt")!.SizeBytes == 100, "mft: file size carried");
+    Check(Find(tree, @"C:\Users\me\a.txt")!.LastWriteUtc == when, "mft: timestamp carried");
+    Check(tree.Children.All(c => c.Name != "$MFT"), "mft: NTFS metafile skipped");
+    Check(Find(tree, @"C:\orphan.bin") is not null, "mft: orphan attached to root");
+
+    // Roll-up: root size = 100 + 200 + 50 = 350.
+    Check(tree.SizeBytes == 350, $"mft: sizes rolled up to root (got {tree.SizeBytes})");
+    Check(tree.FileCount == 3, $"mft: file count rolled up (got {tree.FileCount})");
+    var users = Find(tree, @"C:\Users")!;
+    Check(users.SizeBytes == 100, "mft: directory size = sum of descendants");
+    Check(users.DirectoryCount == 1, "mft: directory count (me) under Users");
+}
+
+// ---- NTFS MFT record parser (synthetic records with fixup) ----
+{
+    // Build a minimal but valid 1024-byte FILE record for a file named "report.txt",
+    // parent FRN 5, size 4096, with a correct fixup sequence across both sectors.
+    const int recSize = 1024, sectorSize = 512;
+    var rec = new byte[recSize];
+
+    // Header: "FILE"
+    rec[0] = (byte)'F'; rec[1] = (byte)'I'; rec[2] = (byte)'L'; rec[3] = (byte)'E';
+    // Update sequence array at offset 0x30, count 3 (1 check value + 2 sectors).
+    const int usaOffset = 0x30, usaCount = 3;
+    BitConverter.GetBytes((ushort)usaOffset).CopyTo(rec, 0x04);
+    BitConverter.GetBytes((ushort)usaCount).CopyTo(rec, 0x06);
+    // Flags: in-use (0x01), not a directory.
+    BitConverter.GetBytes((ushort)0x0001).CopyTo(rec, 0x16);
+    // First attribute at offset 0x38.
+    const int firstAttr = 0x38;
+    BitConverter.GetBytes((ushort)firstAttr).CopyTo(rec, 0x14);
+
+    // --- $FILE_NAME attribute (type 0x30, resident) ---
+    var name = "report.txt";
+    var nameBytes = System.Text.Encoding.Unicode.GetBytes(name);
+    var fnContent = new byte[0x42 + nameBytes.Length];
+    BitConverter.GetBytes((ulong)5).CopyTo(fnContent, 0x00);          // parent FRN = 5
+    BitConverter.GetBytes((long)4096).CopyTo(fnContent, 0x30);        // real size
+    fnContent[0x40] = (byte)name.Length;                              // name length (chars)
+    fnContent[0x41] = 1;                                              // namespace (1 = Win32)
+    nameBytes.CopyTo(fnContent, 0x42);
+
+    var fnHeaderLen = 0x18;
+    var fnAttrLen = fnHeaderLen + fnContent.Length;
+    var off = firstAttr;
+    BitConverter.GetBytes((uint)0x30).CopyTo(rec, off + 0x00);        // type
+    BitConverter.GetBytes(fnAttrLen).CopyTo(rec, off + 0x04);         // length
+    rec[off + 0x08] = 0;                                             // resident
+    BitConverter.GetBytes((ushort)fnHeaderLen).CopyTo(rec, off + 0x14); // content offset
+    fnContent.CopyTo(rec, off + fnHeaderLen);
+
+    // --- $DATA attribute (type 0x80, non-resident, real size 4096) ---
+    off += fnAttrLen;
+    BitConverter.GetBytes((uint)0x80).CopyTo(rec, off + 0x00);       // type
+    BitConverter.GetBytes(0x40).CopyTo(rec, off + 0x04);            // length (header only)
+    rec[off + 0x08] = 1;                                            // non-resident
+    BitConverter.GetBytes((long)4096).CopyTo(rec, off + 0x30);      // real size
+    off += 0x40;
+
+    // --- end marker ---
+    BitConverter.GetBytes(0xFFFFFFFF).CopyTo(rec, off);
+
+    // --- Apply a fixup: put the check value at each sector's last 2 bytes, and the
+    // "real" originals into the USA. We choose check = 0xABCD, originals 0x1111/0x2222.
+    ushort check = 0xABCD;
+    BitConverter.GetBytes(check).CopyTo(rec, usaOffset);             // USA[0] = check
+    BitConverter.GetBytes((ushort)0x1111).CopyTo(rec, usaOffset + 2); // USA[1] sector0 original
+    BitConverter.GetBytes((ushort)0x2222).CopyTo(rec, usaOffset + 4); // USA[2] sector1 original
+    // Write the check value into the last 2 bytes of each sector (what NTFS does on disk).
+    BitConverter.GetBytes(check).CopyTo(rec, sectorSize - 2);        // end of sector 0
+    BitConverter.GetBytes(check).CopyTo(rec, 2 * sectorSize - 2);    // end of sector 1
+
+    var parsed = Reclaim.Core.Scanning.NtfsRecordParser.Parse(rec, sectorSize, ownFrn: 42);
+
+    Check(parsed is not null, "ntfs: valid record parses");
+    Check(parsed!.Value.Name == "report.txt", $"ntfs: name extracted (got '{parsed.Value.Name}')");
+    Check(parsed.Value.ParentFileReferenceNumber == 5, "ntfs: parent FRN extracted");
+    Check(parsed.Value.SizeBytes == 4096, $"ntfs: size from $DATA (got {parsed.Value.SizeBytes})");
+    Check(!parsed.Value.IsDirectory, "ntfs: file (not directory) flag");
+    Check(parsed.Value.FileReferenceNumber == 42, "ntfs: own FRN passed through");
+    // Confirm the fixup actually restored the original bytes.
+    Check(BitConverter.ToUInt16(rec, sectorSize - 2) == 0x1111, "ntfs: fixup restored sector 0 tail");
+    Check(BitConverter.ToUInt16(rec, 2 * sectorSize - 2) == 0x2222, "ntfs: fixup restored sector 1 tail");
+
+    // A record with a wrong fixup check value must be rejected as corrupt.
+    var bad = (byte[])rec.Clone();
+    BitConverter.GetBytes((ushort)0x9999).CopyTo(bad, sectorSize - 2); // tamper
+    Check(Reclaim.Core.Scanning.NtfsRecordParser.Parse(bad, sectorSize, 42) is null,
+        "ntfs: record with bad fixup is rejected");
+
+    // Non-FILE signature → null.
+    var notFile = new byte[recSize];
+    Check(Reclaim.Core.Scanning.NtfsRecordParser.Parse(notFile, sectorSize, 1) is null,
+        "ntfs: non-FILE record rejected");
+}
+
+// ---- NTFS boot sector parser ----
+{
+    var boot = new byte[512];
+    boot[3] = (byte)'N'; boot[4] = (byte)'T'; boot[5] = (byte)'F'; boot[6] = (byte)'S';
+    BitConverter.GetBytes((ushort)512).CopyTo(boot, 0x0B);   // bytes/sector
+    boot[0x0D] = 8;                                          // sectors/cluster → 4096 B/cluster
+    BitConverter.GetBytes((long)786432).CopyTo(boot, 0x30);  // MFT start cluster
+    boot[0x40] = unchecked((byte)(sbyte)-10);                // 2^10 = 1024 B/record
+
+    var geo = Reclaim.Core.Scanning.NtfsBootSectorParser.Parse(boot);
+    Check(geo is not null, "boot: NTFS boot sector parses");
+    Check(geo!.Value.BytesPerSector == 512, "boot: bytes/sector");
+    Check(geo.Value.BytesPerCluster == 4096, "boot: bytes/cluster computed");
+    Check(geo.Value.MftStartCluster == 786432, "boot: MFT start cluster");
+    Check(geo.Value.BytesPerMftRecord == 1024, "boot: record size from negative encoding");
+    Check(geo.Value.MftByteOffset == 786432L * 4096, "boot: MFT byte offset computed");
+    // Non-NTFS boot sector rejected.
+    Check(Reclaim.Core.Scanning.NtfsBootSectorParser.Parse(new byte[512]) is null,
+        "boot: non-NTFS rejected");
+}
+
+// ---- NTFS data-run decoder ----
+{
+    // Two runs:
+    //  Run 1: length 0x10 clusters, start delta +0x20  → start 0x20
+    //  Run 2: length 0x08 clusters, start delta -0x10  → start 0x10 (goes backward!)
+    // Encoding bytes:
+    //  header 0x11 (1 length byte, 1 offset byte), len 0x10, off 0x20
+    //  header 0x11, len 0x08, off 0xF0 (== -16 signed)
+    //  terminator 0x00
+    var runList = new byte[] { 0x11, 0x10, 0x20, 0x11, 0x08, 0xF0, 0x00 };
+    var runs = Reclaim.Core.Scanning.NtfsDataRunDecoder.Decode(runList);
+
+    Check(runs.Count == 2, $"runs: two runs decoded (got {runs.Count})");
+    Check(runs[0].StartCluster == 0x20 && runs[0].ClusterCount == 0x10, "runs: first run absolute");
+    Check(runs[1].ClusterCount == 0x08, "runs: second run length");
+    Check(runs[1].StartCluster == 0x10, $"runs: negative delta applied (got {runs[1].StartCluster})");
+
+    // Multi-byte length: header 0x12 = low nibble 2 (length bytes), high nibble 1
+    // (offset byte). len 0x0100 (bytes 0x00,0x01), off 0x05.
+    var rl2 = new byte[] { 0x12, 0x00, 0x01, 0x05, 0x00 };
+    var runs2 = Reclaim.Core.Scanning.NtfsDataRunDecoder.Decode(rl2);
+    Check(runs2.Count == 1 && runs2[0].ClusterCount == 0x100, "runs: multi-byte length decoded");
+    Check(runs2[0].StartCluster == 0x05, "runs: multi-byte run start");
+}
+
 Console.WriteLine();Console.WriteLine(failures == 0 ? "All tests passed." : $"{failures} test(s) FAILED.");
 return failures == 0 ? 0 : 1;
 

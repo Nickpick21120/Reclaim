@@ -15,6 +15,7 @@ public sealed class SettingsWindow : Window
     private readonly AppSettings _settings;
     private readonly CheckBox _permanentDelete;
     private readonly CheckBox _rememberFolder;
+    private readonly CheckBox _mftScan;
 
     /// <summary>Set to true if the user saved changes, so the caller can apply them.</summary>
     public bool Saved { get; private set; }
@@ -72,6 +73,25 @@ public sealed class SettingsWindow : Window
         };
         root.Children.Add(_rememberFolder);
 
+        // --- Experimental ---
+        root.Children.Add(SectionLabel("Experimental"));
+        _mftScan = new CheckBox
+        {
+            Content = "Fast MFT scan for whole NTFS drives (requires admin)",
+            Foreground = Theme.TextBrush,
+            IsChecked = _settings.ExperimentalMftScan,
+            Margin = new Thickness(0, 4, 0, 0),
+        };
+        root.Children.Add(_mftScan);
+        root.Children.Add(new TextBlock
+        {
+            Foreground = Theme.TextDimBrush, FontSize = 11, TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(22, 4, 0, 0),
+            Text = "Experimental: reads the NTFS Master File Table directly for very fast "
+                 + "whole-drive scans. Only applies when scanning a drive root as administrator; "
+                 + "falls back to the normal scanner otherwise.",
+        });
+
         // --- Buttons ---
         var buttons = new StackPanel
         {
@@ -116,6 +136,7 @@ public sealed class SettingsWindow : Window
     {
         _settings.DefaultPermanentDelete = _permanentDelete.IsChecked == true;
         _settings.RememberLastFolder = _rememberFolder.IsChecked == true;
+        _settings.ExperimentalMftScan = _mftScan.IsChecked == true;
         // If the user turned off "remember", clear any stored folder too.
         if (!_settings.RememberLastFolder)
             _settings.LastFolder = "";

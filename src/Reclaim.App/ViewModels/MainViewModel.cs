@@ -791,7 +791,37 @@ public sealed class MainViewModel : ViewModelBase
 
         try
         {
-            var result = await _scanner.ScanAsync(path, new ScanOptions(), progress, _cts.Token);
+            // Choose the scanner: experimental raw-MFT for whole-NTFS-drive scans
+            // when the user opted in AND it's applicable; otherwise the reliable
+            // directory walker. If MFT scanning throws, fall back rather than fail.
+            IScanner scanner = _scanner;
+            var usingMft = false;
+            if (_settings.ExperimentalMftScan && MftScanner.CanScan(path, out var why))
+            {
+                scanner = new MftScanner();
+                usingMft = true;
+                StatusText = "Scanning with the experimental MFT reader…";
+            }
+            else if (_settings.ExperimentalMftScan)
+            {
+                StatusText = $"MFT scan not used ({why}). Using the normal scanner…";
+            }
+
+            ScanResult result;
+            try
+            {
+                result = await scanner.ScanAsync(path, new ScanOptions(), progress, _cts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception mftEx) when (usingMft)
+            {
+                // The experimental path failed — fall back to the dependable scanner.
+                StatusText = $"MFT scan failed ({mftEx.Message}). Falling back to the normal scanner…";
+                result = await _scanner.ScanAsync(path, new ScanOptions(), progress, _cts.Token);
+            }
 
             var rootVm = new NodeViewModel(result.Root) { IsExpanded = true };
             RootViewModel = rootVm;

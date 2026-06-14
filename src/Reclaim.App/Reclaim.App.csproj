@@ -9,7 +9,7 @@
     <AssemblyName>Reclaim</AssemblyName>
     <RootNamespace>Reclaim.App</RootNamespace>
     <ApplicationIcon>Assets\reclaim.ico</ApplicationIcon>
-    <Version>1.0.0</Version>
+    <Version>1.1.0-mft-experimental</Version>
     <Product>Reclaim</Product>
     <Authors>Reclaim</Authors>
     <Description>A fast disk-space analyzer and cleanup tool for Windows.</Description>
