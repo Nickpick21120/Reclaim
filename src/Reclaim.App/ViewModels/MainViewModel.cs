@@ -49,6 +49,9 @@ public sealed class MainViewModel : ViewModelBase
         _view = _settings.DefaultView == "List"
             ? RightPaneView.LargestItems
             : RightPaneView.Treemap;
+        _permanentDelete = _settings.DefaultPermanentDelete;
+        if (_settings.RememberLastFolder && !string.IsNullOrWhiteSpace(_settings.LastFolder))
+            _targetPath = _settings.LastFolder;
 
         ScanCommand = new RelayCommand(async () => await ScanAsync(), () => !IsScanning);
         CancelCommand = new RelayCommand(() => _cts?.Cancel(), () => IsScanning);
@@ -73,6 +76,8 @@ public sealed class MainViewModel : ViewModelBase
             () => ChooseDuplicateScopeRequested?.Invoke(),
             () => _scannedRoot is not null && !IsScanning);
         FindLargeOldCommand = new RelayCommand(FindLargeOld, () => _scannedRoot is not null && !IsScanning);
+        ExportScanCommand = new RelayCommand(() => ExportScanRequested?.Invoke(),
+            () => _scannedRoot is not null && !IsScanning);
         RefreshRecycleBin();
     }
 
@@ -134,6 +139,33 @@ public sealed class MainViewModel : ViewModelBase
     // ---- Large & old files ----
     public RelayCommand FindLargeOldCommand { get; private set; } = null!;
     public event Action<Reclaim.Core.LargeOld.LargeOldReport>? LargeOldReady;
+
+    // ---- Export ----
+    public RelayCommand ExportScanCommand { get; private set; } = null!;
+    /// <summary>Raised when the user wants to export; the view shows a Save dialog
+    /// and calls WriteExport with the chosen path and format.</summary>
+    public event Action? ExportScanRequested;
+
+    /// <summary>Serialize the current scan to the chosen path. Format is inferred
+    /// from the extension (.json → JSON, else CSV). Returns a status message.</summary>
+    public void WriteExport(string path)
+    {
+        if (_scannedRoot is null)
+            return;
+        try
+        {
+            var isJson = path.EndsWith(".json", StringComparison.OrdinalIgnoreCase);
+            var content = isJson
+                ? Reclaim.Core.Export.ScanExporter.ToJson(_scannedRoot)
+                : Reclaim.Core.Export.ScanExporter.ToCsv(_scannedRoot);
+            System.IO.File.WriteAllText(path, content);
+            StatusText = $"Exported scan to {System.IO.Path.GetFileName(path)}.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Export failed: {ex.Message}";
+        }
+    }
 
     private int _largeOldMinSizeMb = 100;
     /// <summary>"Large" threshold in MB (user-adjustable).</summary>
@@ -395,6 +427,16 @@ public sealed class MainViewModel : ViewModelBase
         set => Set(ref _permanentDelete, value);
     }
 
+    /// <summary>The persisted settings, exposed so the Settings dialog can edit them.</summary>
+    public AppSettings Settings => _settings;
+
+    /// <summary>Re-apply settings after the Settings dialog saves (e.g. the deletion
+    /// default may have changed).</summary>
+    public void ApplySettings()
+    {
+        PermanentDelete = _settings.DefaultPermanentDelete;
+    }
+
     /// <summary>Count of currently-selected, deletable findings across all categories.</summary>
     public int SelectedCleanupCount =>
         CleanupCategories.SelectMany(c => c.Findings).Count(f => f.IsSelected);
@@ -591,6 +633,7 @@ public sealed class MainViewModel : ViewModelBase
                 CleanSelectedCommand.RaiseCanExecuteChanged();
                 ChooseDuplicateScopeCommand.RaiseCanExecuteChanged();
                 FindLargeOldCommand.RaiseCanExecuteChanged();
+                ExportScanCommand.RaiseCanExecuteChanged();
             }
         }
     }
@@ -723,6 +766,13 @@ public sealed class MainViewModel : ViewModelBase
         var path = TargetPath.Trim();
         if (string.IsNullOrEmpty(path))
             return;
+
+        // Remember this folder for next launch, if the user opted in.
+        if (_settings.RememberLastFolder)
+        {
+            _settings.LastFolder = path;
+            _settings.Save();
+        }
 
         _cts = new CancellationTokenSource();
         IsScanning = true;

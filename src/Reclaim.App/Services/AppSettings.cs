@@ -13,6 +13,18 @@ public sealed class AppSettings
     /// <summary>Which pane the app opens in: "Treemap" or "List".</summary>
     public string DefaultView { get; set; } = "Treemap";
 
+    /// <summary>If true, deletions default to permanent (skip Recycle Bin). Defaults
+    /// to false — Recycle Bin — because permanent deletion is unrecoverable and
+    /// should be a deliberate choice, not a casual default.</summary>
+    public bool DefaultPermanentDelete { get; set; }
+
+    /// <summary>If true, the last scanned folder is remembered and pre-filled on
+    /// next launch.</summary>
+    public bool RememberLastFolder { get; set; } = true;
+
+    /// <summary>The last folder scanned (only used when RememberLastFolder is on).</summary>
+    public string LastFolder { get; set; } = "";
+
     private static string Dir =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Reclaim");
 

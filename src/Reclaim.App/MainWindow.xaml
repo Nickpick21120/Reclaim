@@ -40,6 +40,7 @@
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
 
                 <!-- RC logo + wordmark (this area is draggable to move the window) -->
@@ -138,10 +139,17 @@
                         WindowChrome.IsHitTestVisibleInChrome="True"
                         Command="{Binding CancelCommand}" />
 
+                <Button Grid.Column="6" Content="Export…" Margin="8,0,0,0"
+                        WindowChrome.IsHitTestVisibleInChrome="True"
+                        ToolTip="Export the current scan to CSV or JSON"
+                        Command="{Binding ExportScanCommand}" />
+
                 <!-- Window controls (custom, since native caption buttons are off) -->
-                <StackPanel Grid.Column="6" Orientation="Horizontal"
+                <StackPanel Grid.Column="7" Orientation="Horizontal"
                             Margin="14,0,0,0" VerticalAlignment="Top"
                             WindowChrome.IsHitTestVisibleInChrome="True">
+                    <Button Content="&#xE713;" Click="OnSettings" Style="{StaticResource WindowButton}"
+                            ToolTip="Settings" />
                     <Button Content="&#xE921;" Click="OnMinimize" Style="{StaticResource WindowButton}"
                             ToolTip="Minimize" />
                     <Button x:Name="MaxButton" Content="&#xE922;" Click="OnMaximizeRestore"

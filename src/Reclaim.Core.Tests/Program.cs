@@ -679,6 +679,34 @@ Directory.Delete(root, recursive: true);
     Directory.Delete(lo, recursive: true);
 }
 
+// ---- scan exporter ----
+{
+    var ex = Path.Join(Path.GetTempPath(), "reclaim-ex-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(Path.Join(ex, "sub"));
+    File.WriteAllBytes(Path.Join(ex, "a,b.txt"), new byte[10]); // comma in name → must quote
+    File.WriteAllBytes(Path.Join(ex, "sub", "c.bin"), new byte[20]);
+    var exTree = (await new DirectoryScanner().ScanAsync(ex, new ScanOptions())).Root;
+
+    var csv = Reclaim.Core.Export.ScanExporter.ToCsv(exTree);
+    var lines = csv.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+    Check(lines[0].StartsWith("Path,Name,Type,"), "export: CSV has a header row");
+    // root + sub + a,b.txt + c.bin = 4 nodes + header = 5 lines
+    Check(lines.Length == 5, $"export: CSV row per node (got {lines.Length})");
+    Check(csv.Contains("\"a,b.txt\""), "export: CSV quotes a name containing a comma");
+    Check(csv.Contains("c.bin"), "export: CSV includes nested files");
+
+    var json = Reclaim.Core.Export.ScanExporter.ToJson(exTree);
+    using (var doc = System.Text.Json.JsonDocument.Parse(json)) // valid JSON or throws
+    {
+        var rootEl = doc.RootElement;
+        Check(rootEl.GetProperty("type").GetString() == "directory", "export: JSON root is a directory");
+        Check(rootEl.GetProperty("children").GetArrayLength() >= 1, "export: JSON preserves children");
+    }
+    Check(json.Contains("c.bin"), "export: JSON includes nested files");
+
+    Directory.Delete(ex, recursive: true);
+}
+
 Console.WriteLine();Console.WriteLine(failures == 0 ? "All tests passed." : $"{failures} test(s) FAILED.");
 return failures == 0 ? 0 : 1;
 

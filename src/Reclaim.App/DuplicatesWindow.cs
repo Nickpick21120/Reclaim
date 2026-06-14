@@ -32,7 +32,7 @@ public sealed class DuplicatesWindow : Window
         Width = 820;
         Height = 600;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
-        Background = new SolidColorBrush(Color.FromRgb(0x05, 0x05, 0x07));
+        Background = Theme.BgBrush;
 
         Build();
     }
@@ -43,8 +43,8 @@ public sealed class DuplicatesWindow : Window
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
-        var text = new SolidColorBrush(Color.FromRgb(0xE6, 0xE6, 0xEC));
-        var dim = new SolidColorBrush(Color.FromRgb(0x9A, 0x9A, 0xA8));
+        var text = Theme.TextBrush;
+        var dim = Theme.TextDimBrush;
 
         _summary.Foreground = text;
         _summary.FontSize = 14;
@@ -105,10 +105,10 @@ public sealed class DuplicatesWindow : Window
 
     private Border BuildGroupCard(DuplicateGroup group)
     {
-        var panelBrush = new SolidColorBrush(Color.FromRgb(0x12, 0x14, 0x1A));
-        var text = new SolidColorBrush(Color.FromRgb(0xE6, 0xE6, 0xEC));
-        var dim = new SolidColorBrush(Color.FromRgb(0x9A, 0x9A, 0xA8));
-        var accent = new SolidColorBrush(Color.FromRgb(0x2D, 0x6B, 0xFF));
+        var panelBrush = Theme.PanelRaisedBrush;
+        var text = Theme.TextBrush;
+        var dim = Theme.TextDimBrush;
+        var accent = Theme.AccentBrush;
 
         var stack = new StackPanel();
         stack.Children.Add(new TextBlock
@@ -149,9 +149,7 @@ public sealed class DuplicatesWindow : Window
                     Padding = new Thickness(6, 1, 6, 1),
                     Margin = new Thickness(8, 0, 0, 0),
                     VerticalAlignment = VerticalAlignment.Center,
-                    Background = new SolidColorBrush(isProtected
-                        ? Color.FromRgb(0xC4, 0x2B, 0x1C)   // red: protected
-                        : Color.FromRgb(0xD9, 0xA4, 0x41)), // gold: warn
+                    Background = isProtected ? Theme.DangerBrush : Theme.WarnBrush,
                     Child = new TextBlock
                     {
                         Text = isProtected ? "System — protected" : "System location",

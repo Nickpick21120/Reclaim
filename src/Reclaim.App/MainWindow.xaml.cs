@@ -36,6 +36,18 @@ public partial class MainWindow : Window
             var win = new LargeOldWindow(report, () => Vm.NotifyExternalChange()) { Owner = this };
             win.Show();
         };
+        Vm.ExportScanRequested += () =>
+        {
+            var dialog = new SaveFileDialog
+            {
+                Title = "Export scan",
+                Filter = "CSV (spreadsheet)|*.csv|JSON (nested tree)|*.json",
+                FileName = "reclaim-scan",
+                DefaultExt = ".csv",
+            };
+            if (dialog.ShowDialog(this) == true)
+                Vm.WriteExport(dialog.FileName);
+        };
 
         // Crash detection: a crash report file exists only when the previous run
         // caught an unhandled exception. That's the reliable signal — far more so
@@ -66,6 +78,14 @@ public partial class MainWindow : Window
             : WindowState.Maximized;
 
     private void OnClose(object sender, RoutedEventArgs e) => Close();
+
+    private void OnSettings(object sender, RoutedEventArgs e)
+    {
+        var dialog = new SettingsWindow(Vm.Settings) { Owner = this };
+        dialog.ShowDialog();
+        if (dialog.Saved)
+            Vm.ApplySettings();
+    }
 
     private void UpdateMaxButtonGlyph()
     {

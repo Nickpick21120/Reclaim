@@ -10,10 +10,10 @@ Beyond visualization, it identifies reclaimable space, explains what individual
 files are, finds duplicate and forgotten files, and can carefully remove what
 you choose — always recoverable by default.
 
-**Status: actively developed and usable.** Storage visualization, cleanup
-analysis, cautious deletion, file descriptions, duplicate detection, a large-and-old
-file finder, Recycle Bin management, optional elevation, crash reporting, and a
-self-contained distributable build are all in place.
+**Status: 1.0 — stable.** Storage visualization, cleanup analysis, cautious
+deletion, file descriptions, duplicate detection, a large-and-old file finder,
+CSV/JSON export, Recycle Bin management, a settings dialog, optional elevation,
+crash reporting, and a self-contained distributable build are all in place.
 
 ## Features
 
@@ -66,6 +66,12 @@ self-contained distributable build are all in place.
   videos, and stale backups worth reviewing.
 - **Empty the Recycle Bin** from within the app, with its current size shown and
   a confirmation before emptying.
+
+### Export & settings
+- **Export a scan** to CSV (a flat, spreadsheet-friendly row per file and folder)
+  or JSON (the nested tree, structure preserved) from the toolbar.
+- **Settings** (the gear icon): choose the default deletion mode (Recycle Bin vs
+  permanent) and whether to remember the last scanned folder between launches.
 
 ### Safety
 Deletion logic lives in a tested engine, not the UI, so its rules can't be
@@ -188,17 +194,19 @@ duplicate detection, and the large-and-old finder.
 
 ## Roadmap
 
-Done: scanner + folder-coloured treemap, reclaimable-space detection, cautious
-and manual deletion with a location-trust safety model, file descriptions,
-duplicate finder (fast hashing, scope, cancel), large-and-old file finder,
-Recycle Bin management, optional elevation, crash reporting, and a self-contained
-distributable build with automated GitHub releases.
+Done (1.0): scanner + folder-coloured treemap, reclaimable-space detection,
+cautious and manual deletion with a location-trust safety model, file
+descriptions, duplicate finder (fast hashing, scope, cancel), large-and-old file
+finder, CSV/JSON export, Recycle Bin management, a settings dialog, optional
+elevation, crash reporting, and a self-contained distributable build with
+automated GitHub releases.
 
-Possible next steps:
+Possible next steps (post-1.0):
 - **Fast NTFS scan**: read the Master File Table directly for whole-volume scans
-  in seconds (requires elevation; falls back to the directory walker).
+  in seconds (requires elevation; NTFS only; falls back to the directory walker).
 - **Scan history / comparison**: save a scan and compare later to see what grew.
-- **Export** a scan to CSV/JSON, and a **file-type breakdown** across the scan.
+- **File-type breakdown**: aggregate space by file type across the scan.
+- **Light/dark theme toggle**: the colour system is already centralized for this.
 
 ## License
 

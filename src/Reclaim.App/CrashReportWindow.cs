@@ -24,11 +24,11 @@ public sealed class CrashReportWindow : Window
         Width = 640;
         Height = 560;
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
-        Background = new SolidColorBrush(Color.FromRgb(0x05, 0x05, 0x07));
+        Background = Theme.BgBrush;
 
-        var text = new SolidColorBrush(Color.FromRgb(0xE6, 0xE6, 0xEC));
-        var dim = new SolidColorBrush(Color.FromRgb(0x9A, 0x9A, 0xA8));
-        var accent = new SolidColorBrush(Color.FromRgb(0x2D, 0x6B, 0xFF));
+        var text = Theme.TextBrush;
+        var dim = Theme.TextDimBrush;
+        var accent = Theme.AccentBrush;
 
         var root = new Grid { Margin = new Thickness(16) };
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -63,9 +63,9 @@ public sealed class CrashReportWindow : Window
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             FontFamily = new FontFamily("Consolas"),
             FontSize = 11.5,
-            Background = new SolidColorBrush(Color.FromRgb(0x0E, 0x10, 0x16)),
+            Background = Theme.PanelBrush,
             Foreground = text,
-            BorderBrush = new SolidColorBrush(Color.FromRgb(0x2A, 0x2E, 0x3A)),
+            BorderBrush = Theme.BorderBrush,
             Padding = new Thickness(8),
         };
         Grid.SetRow(box, 2);

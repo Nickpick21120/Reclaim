@@ -30,7 +30,7 @@ public sealed class LargeOldWindow : Window
         Width = 860;
         Height = 600;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
-        Background = new SolidColorBrush(Color.FromRgb(0x05, 0x05, 0x07));
+        Background = Theme.BgBrush;
         Build();
     }
 
@@ -40,8 +40,8 @@ public sealed class LargeOldWindow : Window
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
-        var text = new SolidColorBrush(Color.FromRgb(0xE6, 0xE6, 0xEC));
-        var dim = new SolidColorBrush(Color.FromRgb(0x9A, 0x9A, 0xA8));
+        var text = Theme.TextBrush;
+        var dim = Theme.TextDimBrush;
 
         var summary = new TextBlock
         {
@@ -109,8 +109,7 @@ public sealed class LargeOldWindow : Window
                 Padding = new Thickness(6, 1, 6, 1),
                 Margin = new Thickness(0, 0, 8, 0),
                 VerticalAlignment = VerticalAlignment.Center,
-                Background = new SolidColorBrush(isProtected
-                    ? Color.FromRgb(0xC4, 0x2B, 0x1C) : Color.FromRgb(0xD9, 0xA4, 0x41)),
+                Background = isProtected ? Theme.DangerBrush : Theme.WarnBrush,
                 Child = new TextBlock
                 {
                     Text = isProtected ? "System — protected" : "System location",
@@ -134,7 +133,7 @@ public sealed class LargeOldWindow : Window
 
         return new Border
         {
-            Background = new SolidColorBrush(Color.FromRgb(0x12, 0x14, 0x1A)),
+            Background = Theme.PanelRaisedBrush,
             CornerRadius = new CornerRadius(6),
             Padding = new Thickness(12),
             Margin = new Thickness(0, 0, 0, 8),

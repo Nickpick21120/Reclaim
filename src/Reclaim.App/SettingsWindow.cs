@@ -1,0 +1,126 @@
+using System.Windows;
+using System.Windows.Controls;
+using Reclaim.App.Services;
+
+namespace Reclaim.App;
+
+/// <summary>
+/// A small preferences dialog. Currently two settings: the default deletion mode
+/// (Recycle Bin vs permanent) and whether to remember the last scanned folder.
+/// Changes are saved when the dialog is closed with Save. Uses the shared Theme
+/// palette so it stays visually consistent with the rest of the app.
+/// </summary>
+public sealed class SettingsWindow : Window
+{
+    private readonly AppSettings _settings;
+    private readonly CheckBox _permanentDelete;
+    private readonly CheckBox _rememberFolder;
+
+    /// <summary>Set to true if the user saved changes, so the caller can apply them.</summary>
+    public bool Saved { get; private set; }
+
+    public SettingsWindow(AppSettings settings)
+    {
+        _settings = settings;
+
+        Title = "Reclaim — Settings";
+        Width = 460;
+        SizeToContent = SizeToContent.Height;
+        WindowStartupLocation = WindowStartupLocation.CenterOwner;
+        ResizeMode = ResizeMode.NoResize;
+        Background = Theme.BgBrush;
+
+        var root = new StackPanel { Margin = new Thickness(18) };
+
+        root.Children.Add(new TextBlock
+        {
+            Text = "Settings",
+            Foreground = Theme.TextBrush, FontSize = 17, FontWeight = FontWeights.SemiBold,
+            Margin = new Thickness(0, 0, 0, 14),
+        });
+
+        // --- Deletion mode ---
+        root.Children.Add(SectionLabel("Deletion"));
+        _permanentDelete = new CheckBox
+        {
+            Content = "Delete permanently by default (skip the Recycle Bin)",
+            Foreground = Theme.TextBrush,
+            IsChecked = _settings.DefaultPermanentDelete,
+            Margin = new Thickness(0, 4, 0, 0),
+        };
+        _permanentDelete.Checked += (_, _) => UpdateWarning();
+        _permanentDelete.Unchecked += (_, _) => UpdateWarning();
+        root.Children.Add(_permanentDelete);
+
+        _warning = new TextBlock
+        {
+            Foreground = Theme.WarnBrush, FontSize = 11.5, TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(22, 4, 0, 0),
+            Text = "Warning: permanently deleted files cannot be recovered. "
+                 + "The Recycle Bin is recommended so mistakes can be undone.",
+        };
+        root.Children.Add(_warning);
+
+        // --- Scanning ---
+        root.Children.Add(SectionLabel("Scanning"));
+        _rememberFolder = new CheckBox
+        {
+            Content = "Remember the last scanned folder and pre-fill it on launch",
+            Foreground = Theme.TextBrush,
+            IsChecked = _settings.RememberLastFolder,
+            Margin = new Thickness(0, 4, 0, 0),
+        };
+        root.Children.Add(_rememberFolder);
+
+        // --- Buttons ---
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(0, 20, 0, 0),
+        };
+        var save = new Button
+        {
+            Content = "Save", Padding = new Thickness(16, 6, 16, 6),
+            Background = Theme.AccentBrush, Foreground = System.Windows.Media.Brushes.White,
+            BorderThickness = new Thickness(0),
+        };
+        save.Click += (_, _) => DoSave();
+        var cancel = new Button
+        {
+            Content = "Cancel", Padding = new Thickness(16, 6, 16, 6),
+            Margin = new Thickness(8, 0, 0, 0),
+        };
+        cancel.Click += (_, _) => Close();
+        buttons.Children.Add(save);
+        buttons.Children.Add(cancel);
+        root.Children.Add(buttons);
+
+        Content = root;
+        UpdateWarning();
+    }
+
+    private readonly TextBlock _warning;
+
+    private void UpdateWarning() =>
+        _warning.Visibility = _permanentDelete.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+
+    private static TextBlock SectionLabel(string text) => new()
+    {
+        Text = text,
+        Foreground = Theme.TextDimBrush, FontSize = 11, FontWeight = FontWeights.SemiBold,
+        Margin = new Thickness(0, 14, 0, 2),
+    };
+
+    private void DoSave()
+    {
+        _settings.DefaultPermanentDelete = _permanentDelete.IsChecked == true;
+        _settings.RememberLastFolder = _rememberFolder.IsChecked == true;
+        // If the user turned off "remember", clear any stored folder too.
+        if (!_settings.RememberLastFolder)
+            _settings.LastFolder = "";
+        _settings.Save();
+        Saved = true;
+        Close();
+    }
+}
