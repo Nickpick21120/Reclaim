@@ -57,6 +57,11 @@ public static class NtfsRecordParser
         var isDir = (flags & FlagDirectory) != 0;
 
         string? name = null;
+<<<<<<< Updated upstream
+=======
+        int bestNameRank = int.MaxValue; // lower = preferred namespace; DOS is worst
+        byte chosenNamespace = 255;       // namespace of the chosen name (for promotion)
+>>>>>>> Stashed changes
         ulong parentFrn = 0;
         long dataSize = 0;
         long fileNameSize = 0;
@@ -96,6 +101,7 @@ public static class NtfsRecordParser
                     var parentRef = BitConverter.ToUInt64(record, b + 0x00) & 0x0000FFFFFFFFFFFF;
                     var nsByte = record[b + 0x41];
                     var nameLen = record[b + 0x40];
+<<<<<<< Updated upstream
                     // Namespace 2 = DOS short name (e.g. PROGRA~1); prefer the long
                     // name, so only take this name if we don't already have one.
                     var thisName = System.Text.Encoding.Unicode.GetString(record, b + 0x42, nameLen * 2);
@@ -103,6 +109,32 @@ public static class NtfsRecordParser
                     parentFrn = parentRef;
                     if (name is null || nsByte != 2)
                         name = thisName;
+=======
+                    // Bounds-check: the name (nameLen UTF-16 units = nameLen*2 bytes)
+                    // must fit inside the record. A bad nameLen would otherwise read
+                    // adjacent bytes as text, producing garbage / unpaired surrogates.
+                    if (nameLen == 0 || b + 0x42 + nameLen * 2 > record.Length)
+                        break;
+                    var thisName = System.Text.Encoding.Unicode.GetString(record, b + 0x42, nameLen * 2);
+                    if (HasUnpairedSurrogate(thisName))
+                        break;
+
+                    // Namespace: 0=POSIX, 1=Win32, 2=DOS(8.3), 3=Win32+DOS combined.
+                    // Prefer a real long name over a DOS 8.3 short name. We keep the
+                    // name with the best (lowest-preference-number) namespace seen,
+                    // where DOS(2) is worst. The parent ref comes from any $FILE_NAME
+                    // (they all agree), but we only adopt the NAME if it's better.
+                    parentFrn = parentRef;
+                    var thisRank = NamespaceRank(nsByte);
+                    if (name is null || thisRank < bestNameRank)
+                    {
+                        name = thisName;
+                        bestNameRank = thisRank;
+                        chosenNamespace = nsByte;
+                        // The $FILE_NAME size is a fallback; take it alongside the name.
+                        fileNameSize = BitConverter.ToInt64(record, b + 0x30);
+                    }
+>>>>>>> Stashed changes
                     break;
                 }
                 case AttrData:
@@ -125,8 +157,45 @@ public static class NtfsRecordParser
             attrOffset += attrLength;
         }
 
+<<<<<<< Updated upstream
         if (name is null)
             return null; // no usable name — skip
+=======
+        // The "Base File Record" reference (header +0x20): 0 for a normal/base
+        // record, or the FRN of the base record if THIS is an extension record
+        // (overflow holding attributes — often the $DATA — that didn't fit in the
+        // base record of a fragmented file). The low 48 bits are the FRN.
+        ulong baseRef = 0;
+        if (record.Length >= 0x28)
+            baseRef = BitConverter.ToUInt64(record, 0x20) & 0x0000FFFFFFFFFFFF;
+
+        // An extension record (baseRef != 0) is not a file in its own right — it
+        // holds attributes that overflowed from its base record (the long
+        // $FILE_NAME, the real $DATA, timestamps). Report whatever it carries UP to
+        // the base via BaseRecordFrn; the tree builder reconciles. We pass the name
+        // it found (may be null/empty) so the builder can prefer a long name from an
+        // extension over a DOS 8.3 name in the base. Critically, such a record must
+        // NEVER become its own tree node.
+        if (baseRef != 0)
+        {
+            var extName = name ?? "";
+            // Only a Win32/POSIX (non-DOS) name from an extension is worth promoting.
+            if (chosenNamespace == 2)
+                extName = ""; // ignore a DOS name carried in an extension
+            return new MftRecord(
+                FileReferenceNumber: ownFrn,
+                ParentFileReferenceNumber: 0,
+                Name: extName,
+                IsDirectory: false,
+                SizeBytes: dataSize > 0 ? dataSize : 0,
+                LastWriteUtc: lastWrite,
+                BaseRecordFrn: baseRef,
+                ChosenNamespace: extName.Length > 0 ? chosenNamespace : (byte)255);
+        }
+
+        if (name is null)
+            return null; // a base record with no name is unusable
+>>>>>>> Stashed changes
 
         var size = dataSize > 0 ? dataSize : fileNameSize;
         return new MftRecord(
@@ -135,7 +204,13 @@ public static class NtfsRecordParser
             Name: name,
             IsDirectory: isDir,
             SizeBytes: isDir ? 0 : size,
+<<<<<<< Updated upstream
             LastWriteUtc: isDir ? default : lastWrite);
+=======
+            LastWriteUtc: isDir ? default : lastWrite,
+            BaseRecordFrn: baseRef,
+            ChosenNamespace: chosenNamespace);
+>>>>>>> Stashed changes
     }
 
     /// <summary>
@@ -171,6 +246,21 @@ public static class NtfsRecordParser
         return true;
     }
 
+<<<<<<< Updated upstream
+=======
+    /// <summary>Preference rank for an NTFS filename namespace (lower = better).
+    /// Win32 and Win32+DOS combined names are preferred; a pure DOS 8.3 short name
+    /// is the last resort; POSIX sits in between.</summary>
+    private static int NamespaceRank(byte ns) => ns switch
+    {
+        1 => 0, // Win32 (long name)
+        3 => 0, // Win32 + DOS combined (also a real long name)
+        0 => 1, // POSIX
+        2 => 2, // DOS 8.3 short name — least preferred
+        _ => 3,
+    };
+
+>>>>>>> Stashed changes
     private static DateTime FileTimeToUtc(long fileTime)
     {
         if (fileTime <= 0)
@@ -178,4 +268,32 @@ public static class NtfsRecordParser
         try { return DateTime.FromFileTimeUtc(fileTime); }
         catch { return default; }
     }
+<<<<<<< Updated upstream
+=======
+
+    /// <summary>
+    /// True if the string contains an unpaired UTF-16 surrogate — a high surrogate
+    /// not followed by a low one, or a low surrogate not preceded by a high one.
+    /// Valid NTFS filenames never contain these, so their presence indicates the
+    /// name bytes were misread.
+    /// </summary>
+    private static bool HasUnpairedSurrogate(string s)
+    {
+        for (var i = 0; i < s.Length; i++)
+        {
+            var c = s[i];
+            if (char.IsHighSurrogate(c))
+            {
+                if (i + 1 >= s.Length || !char.IsLowSurrogate(s[i + 1]))
+                    return true;
+                i++; // valid pair — skip the low half
+            }
+            else if (char.IsLowSurrogate(c))
+            {
+                return true; // low surrogate without a preceding high one
+            }
+        }
+        return false;
+    }
+>>>>>>> Stashed changes
 }

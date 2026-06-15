@@ -12,7 +12,15 @@ public readonly record struct MftRecord(
     string Name,
     bool IsDirectory,
     long SizeBytes,
+<<<<<<< Updated upstream
     DateTime LastWriteUtc);
+=======
+    DateTime LastWriteUtc,
+    ulong BaseRecordFrn = 0,
+    // Namespace byte of the chosen $FILE_NAME (used by the tree builder to promote
+    // a Win32 long name over a DOS 8.3 short name across base/extension records).
+    byte ChosenNamespace = 255);
+>>>>>>> Stashed changes
 
 /// <summary>
 /// Rebuilds a <see cref="FileSystemNode"/> tree from a flat list of MFT records.
@@ -41,18 +49,90 @@ public static class MftTreeBuilder
     {
         var rootPath = driveLetter.EndsWith('\\') ? driveLetter : driveLetter + "\\";
 
+<<<<<<< Updated upstream
         // Index children by their parent FRN so we can walk top-down. Skip NTFS
         // metafiles ($MFT, $LogFile, …) and self/parent entries.
+=======
+        // First pass over EXTENSION records (BaseRecordFrn != 0). These are not files
+        // themselves — they hold attributes that overflowed from a base record via
+        // $ATTRIBUTE_LIST: the real $DATA size, and sometimes the Win32 long
+        // $FILE_NAME and timestamps. We collect, per base FRN:
+        //   - the largest $DATA real size (a single value, never summed)
+        //   - a promoted long name (non-DOS) if the base only had a short name
+        //   - a last-write timestamp if the extension carries one
+        var extSizeByBase = new Dictionary<ulong, long>();
+        var extNameByBase = new Dictionary<ulong, (string name, byte ns)>();
+        var extWriteByBase = new Dictionary<ulong, DateTime>();
+        foreach (var rec in records)
+        {
+            if (rec.BaseRecordFrn == 0)
+                continue; // not an extension record
+
+            if (rec.SizeBytes > 0)
+            {
+                extSizeByBase.TryGetValue(rec.BaseRecordFrn, out var cur);
+                if (rec.SizeBytes > cur)
+                    extSizeByBase[rec.BaseRecordFrn] = rec.SizeBytes;
+            }
+            if (!string.IsNullOrEmpty(rec.Name))
+            {
+                // Keep the best (lowest namespace rank) name seen for this base.
+                if (!extNameByBase.TryGetValue(rec.BaseRecordFrn, out var existing)
+                    || NamespaceRank(rec.ChosenNamespace) < NamespaceRank(existing.ns))
+                    extNameByBase[rec.BaseRecordFrn] = (rec.Name, rec.ChosenNamespace);
+            }
+            if (rec.LastWriteUtc != default)
+                extWriteByBase[rec.BaseRecordFrn] = rec.LastWriteUtc;
+        }
+
+        // Index children by their parent FRN so we can walk top-down. Skip NTFS
+        // metafiles, self/parent entries, AND extension records (BaseRecordFrn != 0).
+        // For each base file, reconcile in the better size/name/timestamp that may
+        // have lived in its extension records.
+>>>>>>> Stashed changes
         var childrenByParent = new Dictionary<ulong, List<MftRecord>>();
         foreach (var rec in records)
         {
             if (rec.FileReferenceNumber == rootFrn)
                 continue;
+<<<<<<< Updated upstream
             if (rec.Name is "." or ".." || rec.Name.StartsWith('$'))
                 continue;
             if (!childrenByParent.TryGetValue(rec.ParentFileReferenceNumber, out var list))
                 childrenByParent[rec.ParentFileReferenceNumber] = list = [];
             list.Add(rec);
+=======
+            if (rec.BaseRecordFrn != 0)
+                continue; // extension record — reconciled into its base, not a node
+            if (string.IsNullOrEmpty(rec.Name))
+                continue; // base record with no usable name
+            if (rec.Name is "." or ".." || rec.Name.StartsWith('$'))
+                continue;
+
+            var effective = rec;
+
+            // Size: max of base's own $DATA and any extension's $DATA (never summed).
+            if (!rec.IsDirectory && extSizeByBase.TryGetValue(rec.FileReferenceNumber, out var extSize)
+                && extSize > effective.SizeBytes)
+                effective = effective with { SizeBytes = extSize };
+
+            // Name: if the base record's chosen name is a DOS 8.3 name (namespace 2)
+            // but an extension carries a better (Win32/POSIX) long name, promote it.
+            if (rec.ChosenNamespace == 2
+                && extNameByBase.TryGetValue(rec.FileReferenceNumber, out var promoted)
+                && NamespaceRank(promoted.ns) < 2
+                && promoted.name.Length > 0)
+                effective = effective with { Name = promoted.name };
+
+            // Timestamp: if the base lacked one but an extension had it.
+            if (!rec.IsDirectory && effective.LastWriteUtc == default
+                && extWriteByBase.TryGetValue(rec.FileReferenceNumber, out var extWrite))
+                effective = effective with { LastWriteUtc = extWrite };
+
+            if (!childrenByParent.TryGetValue(effective.ParentFileReferenceNumber, out var list))
+                childrenByParent[effective.ParentFileReferenceNumber] = list = [];
+            list.Add(effective);
+>>>>>>> Stashed changes
         }
 
         var root = new FileSystemNode
@@ -74,6 +154,13 @@ public static class MftTreeBuilder
         {
             if (seen.Contains(rec.FileReferenceNumber))
                 continue;
+<<<<<<< Updated upstream
+=======
+            if (rec.BaseRecordFrn != 0)
+                continue; // extension record, not a file
+            if (string.IsNullOrEmpty(rec.Name))
+                continue;
+>>>>>>> Stashed changes
             if (rec.Name is "." or ".." || rec.Name.StartsWith('$'))
                 continue;
             // Only attach if its parent truly isn't in the tree (genuine orphan).
@@ -86,11 +173,29 @@ public static class MftTreeBuilder
         return root;
     }
 
+<<<<<<< Updated upstream
     private static void AttachChildren(
         FileSystemNode parent, ulong parentFrn,
         Dictionary<ulong, List<MftRecord>> childrenByParent, HashSet<ulong> visited)
     {
         if (!childrenByParent.TryGetValue(parentFrn, out var kids))
+=======
+    /// <summary>Namespace preference rank (lower = better); DOS 8.3 is worst.
+    /// Mirrors the parser's ranking so name promotion across records is consistent.</summary>
+    private static int NamespaceRank(byte ns) => ns switch
+    {
+        1 => 0, // Win32
+        3 => 0, // Win32 + DOS combined
+        0 => 1, // POSIX
+        2 => 2, // DOS 8.3
+        _ => 3,
+    };
+
+    private static void AttachChildren(
+        FileSystemNode parent, ulong parentFrn,
+        Dictionary<ulong, List<MftRecord>> childrenByParent, HashSet<ulong> visited)
+    {        if (!childrenByParent.TryGetValue(parentFrn, out var kids))
+>>>>>>> Stashed changes
             return;
         foreach (var rec in kids)
         {

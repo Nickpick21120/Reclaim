@@ -108,7 +108,31 @@ public sealed class MftScanner : IScanner
                 "MFT scanning needs administrator rights.");
 
         using var volume = new FileStream(handle, FileAccess.Read);
+<<<<<<< Updated upstream
 
+=======
+        var records = CollectRecords(volume, progress, ct);
+
+        // 5) Stitch into a tree. NTFS root directory FRN is always 5.
+        var tree = MftTreeBuilder.Build(records, rootFrn: 5, driveLetter);
+
+        sw.Stop();
+        return new ScanResult
+        {
+            Root = tree,
+            Elapsed = sw.Elapsed,
+            FilesScanned = tree.FileCount,
+            DirectoriesScanned = tree.DirectoryCount,
+            ErrorCount = 0,
+        };
+    }
+
+    /// <summary>Shared MFT reading pipeline: boot sector → MFT location → data runs
+    /// → read &amp; parse every record. Returns the raw parsed records.</summary>
+    private List<MftRecord> CollectRecords(
+        FileStream volume, IProgress<ScanProgress>? progress, CancellationToken ct)
+    {
+>>>>>>> Stashed changes
         // 1) Boot sector → geometry.
         var bootBuf = ReadAt(volume, 0, 512);
         var geo = NtfsBootSectorParser.Parse(bootBuf)
@@ -118,8 +142,12 @@ public sealed class MftScanner : IScanner
         var recordSize = geo.BytesPerMftRecord;
         var mftRecord0 = ReadAt(volume, geo.MftByteOffset, recordSize);
 
+<<<<<<< Updated upstream
         // 3) Decode $MFT's $DATA runs. We need the raw run list bytes from record 0;
         //    extract them via a focused helper (the $DATA non-resident run header).
+=======
+        // 3) Decode $MFT's $DATA runs.
+>>>>>>> Stashed changes
         var runs = ExtractMftDataRuns(mftRecord0, geo)
                    ?? throw new IOException("Couldn't locate the MFT data runs.");
 
@@ -134,7 +162,10 @@ public sealed class MftScanner : IScanner
             ct.ThrowIfCancellationRequested();
             if (run.StartCluster < 0)
             {
+<<<<<<< Updated upstream
                 // sparse run: advance the record index but nothing to read.
+=======
+>>>>>>> Stashed changes
                 recordIndex += run.ClusterCount * clusterBytes / recordSize;
                 continue;
             }
@@ -142,14 +173,20 @@ public sealed class MftScanner : IScanner
             long runByteStart = run.StartCluster * clusterBytes;
             long runByteLen = run.ClusterCount * clusterBytes;
 
+<<<<<<< Updated upstream
             // Read the run in ~1 MB chunks to bound memory.
+=======
+>>>>>>> Stashed changes
             const int chunk = 1024 * 1024;
             long read = 0;
             while (read < runByteLen)
             {
                 ct.ThrowIfCancellationRequested();
                 var toRead = (int)Math.Min(chunk, runByteLen - read);
+<<<<<<< Updated upstream
                 // align to a whole number of records
+=======
+>>>>>>> Stashed changes
                 toRead -= toRead % recordSize;
                 if (toRead <= 0) break;
 
@@ -167,6 +204,7 @@ public sealed class MftScanner : IScanner
                     }
                 }
                 read += toRead;
+<<<<<<< Updated upstream
                 progress?.Report(new ScanProgress(filesSeen, 0, 0, 0, volumePath));
             }
         }
@@ -183,6 +221,13 @@ public sealed class MftScanner : IScanner
             DirectoriesScanned = tree.DirectoryCount,
             ErrorCount = 0,
         };
+=======
+                progress?.Report(new ScanProgress(filesSeen, 0, 0, 0, "MFT"));
+            }
+        }
+
+        return records;
+>>>>>>> Stashed changes
     }
 
     /// <summary>Read exactly <paramref name="count"/> bytes at an absolute volume

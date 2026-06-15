@@ -746,6 +746,55 @@ Directory.Delete(root, recursive: true);
     var users = Find(tree, @"C:\Users")!;
     Check(users.SizeBytes == 100, "mft: directory size = sum of descendants");
     Check(users.DirectoryCount == 1, "mft: directory count (me) under Users");
+<<<<<<< Updated upstream
+=======
+
+    // Fragmented-file case: a base record with $DATA size 0 in the base, plus a
+    // nameless extension record carrying the real 5000-byte $DATA for it. The
+    // extension's size must fold into the base file.
+    var fragRecords = new List<Reclaim.Core.Scanning.MftRecord>
+    {
+        new(50, ROOT, "bigfile.bin", false, 0, when),                   // base, size unknown inline
+        new(51, 0, "", false, 5000, default, BaseRecordFrn: 50),        // extension carrying $DATA
+    };
+    var fragTree = Reclaim.Core.Scanning.MftTreeBuilder.Build(fragRecords, ROOT, "C:");
+    var big = Find(fragTree, @"C:\bigfile.bin");
+    Check(big is not null, "mft: fragmented base file appears in tree");
+    Check(big!.SizeBytes == 5000, $"mft: extension $DATA size used when base is 0 (got {big.SizeBytes})");
+    Check(fragTree.Children.All(c => c.Name != ""), "mft: nameless extension record not a tree node");
+
+    // Double-count guard: a base record that ALREADY reports the full size, plus an
+    // extension record that also reports the same real size (extra data runs for the
+    // same $DATA). The result must be the real size, NOT the sum (which was a bug).
+    var dupRecords = new List<Reclaim.Core.Scanning.MftRecord>
+    {
+        new(60, ROOT, "movie.mkv", false, 8000, when),                 // base already has full size
+        new(61, 0, "", false, 8000, default, BaseRecordFrn: 60),       // extension repeats real size
+    };
+    var dupTree = Reclaim.Core.Scanning.MftTreeBuilder.Build(dupRecords, ROOT, "C:");
+    var movie = Find(dupTree, @"C:\movie.mkv");
+    Check(movie!.SizeBytes == 8000, $"mft: base+extension same size not doubled (got {movie.SizeBytes})");
+
+    // $ATTRIBUTE_LIST name promotion: base record holds only the DOS 8.3 short name
+    // (namespace 2), and an extension record carries the Win32 long name (ns 1).
+    // The tree must show the LONG name and not create a duplicate node.
+    var promoteRecords = new List<Reclaim.Core.Scanning.MftRecord>
+    {
+        // base: DOS short name, ChosenNamespace 2
+        new(70, ROOT, "LONGFI~1.DLL", false, 12345, when, BaseRecordFrn: 0,
+            ChosenNamespace: 2),
+        // extension: carries the Win32 long name (ns 1) and the $DATA size
+        new(71, 0, "LongFileName.dll", false, 12345, default, BaseRecordFrn: 70,
+            ChosenNamespace: 1),
+    };
+    var promoteTree = Reclaim.Core.Scanning.MftTreeBuilder.Build(promoteRecords, ROOT, "C:");
+    Check(Find(promoteTree, @"C:\LongFileName.dll") is not null,
+        "mft: long name promoted from extension record");
+    Check(Find(promoteTree, @"C:\LONGFI~1.DLL") is null,
+        "mft: DOS short name not shown when long name available");
+    Check(promoteTree.Children.Count(c => c.Name is "LongFileName.dll" or "LONGFI~1.DLL") == 1,
+        "mft: exactly one node for the file (no duplicate)");
+>>>>>>> Stashed changes
 }
 
 // ---- NTFS MFT record parser (synthetic records with fixup) ----
@@ -829,6 +878,41 @@ Directory.Delete(root, recursive: true);
     var notFile = new byte[recSize];
     Check(Reclaim.Core.Scanning.NtfsRecordParser.Parse(notFile, sectorSize, 1) is null,
         "ntfs: non-FILE record rejected");
+<<<<<<< Updated upstream
+=======
+
+    // Guard against the misread that caused unpaired surrogates: a $FILE_NAME whose
+    // declared length would run past the record must NOT be read as a (garbage) name.
+    // Build a fresh valid record, then set an absurd name length and re-fixup.
+    var bigName = new byte[recSize];
+    rec.CopyTo(bigName, 0);                 // start from the parsed-good record
+    // Find the $FILE_NAME content name-length byte and inflate it wildly.
+    // (firstAttr + fnHeaderLen + 0x40 is the name-length field, per how we built it.)
+    var nameLenPos = firstAttr + fnHeaderLen + 0x40;
+    bigName[nameLenPos] = 250;              // 250 chars * 2 = 500 bytes — overruns
+    // rebuild fixup tails so the record still validates structurally
+    BitConverter.GetBytes(check).CopyTo(bigName, sectorSize - 2);
+    BitConverter.GetBytes(check).CopyTo(bigName, 2 * sectorSize - 2);
+    var parsedBig = Reclaim.Core.Scanning.NtfsRecordParser.Parse(bigName, sectorSize, 7);
+    // Either it's rejected (null) or it skipped the bad name — but it must NOT return
+    // a name containing unpaired surrogates / garbage.
+    Check(parsedBig is null || !ContainsLoneSurrogate(parsedBig.Value.Name),
+        "ntfs: over-long name length doesn't produce a garbage name");
+}
+
+static bool ContainsLoneSurrogate(string s)
+{
+    for (var i = 0; i < s.Length; i++)
+    {
+        if (char.IsHighSurrogate(s[i]))
+        {
+            if (i + 1 >= s.Length || !char.IsLowSurrogate(s[i + 1])) return true;
+            i++;
+        }
+        else if (char.IsLowSurrogate(s[i])) return true;
+    }
+    return false;
+>>>>>>> Stashed changes
 }
 
 // ---- NTFS boot sector parser ----

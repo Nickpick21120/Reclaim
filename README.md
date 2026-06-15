@@ -191,6 +191,28 @@ All destructive operations are isolated behind small injected interfaces
 testable with fakes. The test harness covers the scanner, treemap math, cleanup
 analysis, deletion-engine safety, the location-trust classifier, file knowledge,
 duplicate detection, and the large-and-old finder.
+<<<<<<< Updated upstream
+=======
+
+## Experimental: fast MFT scanning
+
+Reclaim includes an **experimental** fast scanner that reads the NTFS Master File
+Table directly, scanning a whole drive in a few seconds instead of tens of
+seconds. It's **off by default** and opt-in via Settings → Experimental → "Fast
+MFT scan".
+
+Because it reads the raw volume, it requires running Reclaim **as administrator**;
+enabling it offers to restart elevated. It only engages when scanning an NTFS
+fixed-drive **root** while elevated — for subfolders, non-NTFS drives, or when not
+elevated, Reclaim transparently uses the normal directory scanner instead. The
+MFT scanner is strictly read-only (it opens the volume for reading only).
+
+Accuracy is very close to the normal scanner (within a fraction of a percent on a
+typical system); small differences come from filesystem features the two scanners
+account for differently, such as Volume Shadow Copy data, cloud-backed (OneDrive)
+files, and hardlinked system components. As an experimental feature it's best used
+for quick whole-drive overviews; the normal scanner remains the default.
+>>>>>>> Stashed changes
 
 ## Roadmap
 
@@ -201,9 +223,13 @@ finder, CSV/JSON export, Recycle Bin management, a settings dialog, optional
 elevation, crash reporting, and a self-contained distributable build with
 automated GitHub releases.
 
+<<<<<<< Updated upstream
 Possible next steps (post-1.0):
 - **Fast NTFS scan**: read the Master File Table directly for whole-volume scans
   in seconds (requires elevation; NTFS only; falls back to the directory walker).
+=======
+Possible next steps:
+>>>>>>> Stashed changes
 - **Scan history / comparison**: save a scan and compare later to see what grew.
 - **File-type breakdown**: aggregate space by file type across the scan.
 - **Light/dark theme toggle**: the colour system is already centralized for this.
