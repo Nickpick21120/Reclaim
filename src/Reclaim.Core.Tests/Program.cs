@@ -66,9 +66,11 @@ WriteFile(Path.Join(locked, "secret.bin"), 999);
 var canLock = !OperatingSystem.IsWindows() && Environment.UserName != "root";
 if (canLock)
 {
+#pragma warning disable CA1416 // guarded by !OperatingSystem.IsWindows() above
     File.SetUnixFileMode(locked, UnixFileMode.None);
     var withLocked = await scanner.ScanAsync(root, options);
     File.SetUnixFileMode(locked, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+#pragma warning restore CA1416
 
     Check(withLocked.ErrorCount >= 1, "inaccessible dir counted as error");
     Check(withLocked.Root.HadError, "error flag propagates to root");

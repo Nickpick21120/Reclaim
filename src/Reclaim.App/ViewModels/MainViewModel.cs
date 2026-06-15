@@ -796,15 +796,19 @@ public sealed class MainViewModel : ViewModelBase
             // directory walker. If MFT scanning throws, fall back rather than fail.
             IScanner scanner = _scanner;
             var usingMft = false;
-            if (_settings.ExperimentalMftScan && MftScanner.CanScan(path, out var why))
+            if (_settings.ExperimentalMftScan)
             {
-                scanner = new MftScanner();
-                usingMft = true;
-                StatusText = "Scanning with the experimental MFT reader…";
-            }
-            else if (_settings.ExperimentalMftScan)
-            {
-                StatusText = $"MFT scan not used ({why}). Using the normal scanner…";
+                var canMft = MftScanner.CanScan(path, out var why);
+                if (canMft)
+                {
+                    scanner = new MftScanner();
+                    usingMft = true;
+                    StatusText = "Scanning with the experimental MFT reader…";
+                }
+                else
+                {
+                    StatusText = $"MFT scan not used ({why}). Using the normal scanner…";
+                }
             }
 
             ScanResult result;
