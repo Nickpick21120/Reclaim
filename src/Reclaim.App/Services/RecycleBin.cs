@@ -13,7 +13,12 @@ public static class RecycleBin
     {
         try
         {
-            var info = new SHQUERYRBINFO { cbSize = Marshal.SizeOf<SHQUERYRBINFO>() };
+            var info = new SHQUERYRBINFO();
+            // The shell validates cbSize against the exact native struct size; with
+            // 8-byte alignment (two __int64 members) that's 24 bytes on x64, not the
+            // 20 you'd get from a packed layout. Marshal.SizeOf on the naturally-
+            // aligned struct gives the right value.
+            info.cbSize = Marshal.SizeOf<SHQUERYRBINFO>();
             // null root = all drives
             var hr = SHQueryRecycleBin(null, ref info);
             return hr == 0 ? (info.i64Size, info.i64NumItems) : (0, 0);
@@ -36,11 +41,13 @@ public static class RecycleBin
         const uint SHERB_NOSOUND = 0x4;
         var hr = SHEmptyRecycleBin(IntPtr.Zero, null,
             SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND);
-        // 0 = success; some systems return a non-zero code when already empty.
-        return hr == 0;
+        // 0 (S_OK) = success. Some Windows versions return E_UNEXPECTED (0x8000FFFF)
+        // when the bin was already empty — that's not a real failure for our purpose.
+        const int E_UNEXPECTED = unchecked((int)0x8000FFFF);
+        return hr == 0 || hr == E_UNEXPECTED;
     }
 
-    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    [StructLayout(LayoutKind.Sequential, Pack = 8)]
     private struct SHQUERYRBINFO
     {
         public int cbSize;
