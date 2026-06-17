@@ -66,6 +66,7 @@ public sealed class MainViewModel : ViewModelBase
         CleanupModeCommand = new RelayCommand(() => Mode = AppMode.Cleanup);
         CleanSelectedCommand = new RelayCommand(CleanSelected, () => SelectedCleanupCount > 0 && !IsScanning);
         DeleteFileCommand = new RelayCommand<object>(o => DeleteFileManually(NodeOf(o)));
+        OpenFileCommand = new RelayCommand<object>(o => OpenFile(NodeOf(o)));
         DeleteContentsCommand = new RelayCommand<object>(o => DeleteFolderContentsManually(NodeOf(o)));
         DeleteFolderCommand = new RelayCommand<object>(o => DeleteFolderManually(NodeOf(o)));
         CleanThisFileCommand = new RelayCommand<object>(o => CleanSingleFile(o as FlatItemViewModel));
@@ -336,6 +337,8 @@ public sealed class MainViewModel : ViewModelBase
 
     private FileInfoResult? _selectedInfo;
     private string _selectedName = "";
+    private string _selectedPreview = "";
+    private FileSystemNode? _selectedNode;
 
     /// <summary>Plain-language description of the currently-selected item, shown
     /// in the Storage info panel. Null when nothing is selected.</summary>
@@ -353,6 +356,19 @@ public sealed class MainViewModel : ViewModelBase
         private set => Set(ref _selectedName, value);
     }
 
+    /// <summary>A short text preview of the selected file's contents, shown in the
+    /// info panel. Empty when the selection isn't a previewable text file.</summary>
+    public string SelectedPreview
+    {
+        get => _selectedPreview;
+        private set { _selectedPreview = value; Raise(nameof(SelectedPreview)); Raise(nameof(HasSelectedPreview)); }
+    }
+
+    public bool HasSelectedPreview => !string.IsNullOrEmpty(_selectedPreview);
+
+    /// <summary>Full path of the current selection, for the right-click "Open" action.</summary>
+    public string? SelectedPath { get; private set; }
+
     /// <summary>Resolve and show the description for a node (or clear it).</summary>
     public void DescribeSelection(FileSystemNode? node)
     {
@@ -360,10 +376,41 @@ public sealed class MainViewModel : ViewModelBase
         {
             SelectedInfo = null;
             SelectedName = "";
+            SelectedPreview = "";
+            SelectedPath = null;
+            _selectedNode = null;
             return;
         }
+        _selectedNode = node;
         SelectedName = node.Name;
         SelectedInfo = FileKnowledgeBase.Describe(node);
+        SelectedPath = node.FullPath;
+        SelectedPreview = (node.IsDirectory || !_settings.PreviewTextOnHover)
+            ? "" : ReadPreview(node.FullPath);
+    }
+
+    /// <summary>Safe, capped text-preview read for the info panel. Any IO error or
+    /// non-text/binary content yields an empty string (panel hides the preview).</summary>
+    private static string ReadPreview(string path)
+    {
+        try
+        {
+            if (!Reclaim.Core.Knowledge.TextFilePreview.LooksLikeTextFile(path))
+                return "";
+            var buffer = new byte[Reclaim.Core.Knowledge.TextFilePreview.MaxBytes];
+            int read;
+            using (var fs = new System.IO.FileStream(
+                path, System.IO.FileMode.Open, System.IO.FileAccess.Read,
+                System.IO.FileShare.ReadWrite))
+            {
+                read = fs.Read(buffer, 0, buffer.Length);
+            }
+            return Reclaim.Core.Knowledge.TextFilePreview.BuildPreview(buffer, read) ?? "";
+        }
+        catch
+        {
+            return "";
+        }
     }
 
     public RelayCommand RestartAsAdminCommand { get; }
@@ -387,6 +434,31 @@ public sealed class MainViewModel : ViewModelBase
     }
 
     public RelayCommand<object> DeleteFileCommand { get; }
+    public RelayCommand<object> OpenFileCommand { get; }
+
+    /// <summary>Open a file in the OS default application (right-click → Open).
+    /// Only opens files, never directories. Uses the shell, and surfaces a friendly
+    /// message if it fails (e.g. no associated app) rather than throwing.</summary>
+    private void OpenFile(FileSystemNode? node)
+    {
+        if (node is null || node.IsDirectory)
+            return;
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = node.FullPath,
+                UseShellExecute = true, // route through the shell to honor file associations
+            });
+        }
+        catch (Exception ex)
+        {
+            System.Windows.MessageBox.Show(
+                $"Couldn't open this file:\n{ex.Message}",
+                "Open file", System.Windows.MessageBoxButton.OK,
+                System.Windows.MessageBoxImage.Information);
+        }
+    }
     public RelayCommand<object> DeleteContentsCommand { get; }
     public RelayCommand<object> DeleteFolderCommand { get; }
     public RelayCommand<object> CleanThisFileCommand { get; }
@@ -435,6 +507,9 @@ public sealed class MainViewModel : ViewModelBase
     public void ApplySettings()
     {
         PermanentDelete = _settings.DefaultPermanentDelete;
+        // Re-evaluate the current selection's preview so toggling the setting takes
+        // effect immediately rather than only on the next selection.
+        DescribeSelection(_selectedNode);
     }
 
     /// <summary>Count of currently-selected, deletable findings across all categories.</summary>
@@ -791,7 +866,41 @@ public sealed class MainViewModel : ViewModelBase
 
         try
         {
-            var result = await _scanner.ScanAsync(path, new ScanOptions(), progress, _cts.Token);
+            // Choose the scanner: experimental raw-MFT for whole-NTFS-drive scans
+            // when the user opted in AND it's applicable; otherwise the reliable
+            // directory walker. If MFT scanning throws, fall back rather than fail.
+            IScanner scanner = _scanner;
+            var usingMft = false;
+            if (_settings.ExperimentalMftScan)
+            {
+                var canMft = MftScanner.CanScan(path, out var why);
+                if (canMft)
+                {
+                    scanner = new MftScanner();
+                    usingMft = true;
+                    StatusText = "Scanning with the experimental MFT reader…";
+                }
+                else
+                {
+                    StatusText = $"MFT scan not used ({why}). Using the normal scanner…";
+                }
+            }
+
+            ScanResult result;
+            try
+            {
+                result = await scanner.ScanAsync(path, new ScanOptions(), progress, _cts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception mftEx) when (usingMft)
+            {
+                // The experimental path failed — fall back to the dependable scanner.
+                StatusText = $"MFT scan failed ({mftEx.Message}). Falling back to the normal scanner…";
+                result = await _scanner.ScanAsync(path, new ScanOptions(), progress, _cts.Token);
+            }
 
             var rootVm = new NodeViewModel(result.Root) { IsExpanded = true };
             RootViewModel = rootVm;

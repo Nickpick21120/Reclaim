@@ -66,9 +66,11 @@ WriteFile(Path.Join(locked, "secret.bin"), 999);
 var canLock = !OperatingSystem.IsWindows() && Environment.UserName != "root";
 if (canLock)
 {
+#pragma warning disable CA1416 // guarded by !OperatingSystem.IsWindows() above
     File.SetUnixFileMode(locked, UnixFileMode.None);
     var withLocked = await scanner.ScanAsync(root, options);
     File.SetUnixFileMode(locked, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+#pragma warning restore CA1416
 
     Check(withLocked.ErrorCount >= 1, "inaccessible dir counted as error");
     Check(withLocked.Root.HadError, "error flag propagates to root");
@@ -705,6 +707,310 @@ Directory.Delete(root, recursive: true);
     Check(json.Contains("c.bin"), "export: JSON includes nested files");
 
     Directory.Delete(ex, recursive: true);
+}
+
+// ---- MFT tree builder (pure path reconstruction, no real volume needed) ----
+{
+    const ulong ROOT = 5; // NTFS root directory FRN
+    // Build a synthetic volume:  C:\  ->  Users(10)  ->  me(11)  ->  a.txt(12, 100 bytes)
+    //                                  \-> Windows(20) -> sys.dll(21, 200 bytes)
+    //                            plus an orphan(99) whose parent FRN doesn't exist.
+    var when = new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+    var records = new List<Reclaim.Core.Scanning.MftRecord>
+    {
+        new(10, ROOT, "Users", true, 0, default),
+        new(11, 10, "me", true, 0, default),
+        new(12, 11, "a.txt", false, 100, when),
+        new(20, ROOT, "Windows", true, 0, default),
+        new(21, 20, "sys.dll", false, 200, when),
+        new(30, ROOT, "$MFT", false, 999, when),   // metafile — must be skipped
+        new(99, 12345, "orphan.bin", false, 50, when), // missing parent → attach to root
+    };
+
+    var tree = Reclaim.Core.Scanning.MftTreeBuilder.Build(records, ROOT, "C:");
+
+    FileSystemNode? Find(FileSystemNode n, string path) =>
+        string.Equals(n.FullPath, path, StringComparison.OrdinalIgnoreCase) ? n
+        : n.Children.Select(c => Find(c, path)).FirstOrDefault(r => r is not null);
+
+    Check(Find(tree, @"C:\Users\me\a.txt") is not null, "mft: nested path reconstructed");
+    Check(Find(tree, @"C:\Windows\sys.dll") is not null, "mft: second branch reconstructed");
+    Check(Find(tree, @"C:\Users\me\a.txt")!.SizeBytes == 100, "mft: file size carried");
+    Check(Find(tree, @"C:\Users\me\a.txt")!.LastWriteUtc == when, "mft: timestamp carried");
+    Check(tree.Children.All(c => c.Name != "$MFT"), "mft: NTFS metafile skipped");
+    Check(Find(tree, @"C:\orphan.bin") is not null, "mft: orphan attached to root");
+
+    // Roll-up: root size = 100 + 200 + 50 = 350.
+    Check(tree.SizeBytes == 350, $"mft: sizes rolled up to root (got {tree.SizeBytes})");
+    Check(tree.FileCount == 3, $"mft: file count rolled up (got {tree.FileCount})");
+    var users = Find(tree, @"C:\Users")!;
+    Check(users.SizeBytes == 100, "mft: directory size = sum of descendants");
+    Check(users.DirectoryCount == 1, "mft: directory count (me) under Users");
+
+    // Fragmented-file case: a base record with $DATA size 0 in the base, plus a
+    // nameless extension record carrying the real 5000-byte $DATA for it. The
+    // extension's size must fold into the base file.
+    var fragRecords = new List<Reclaim.Core.Scanning.MftRecord>
+    {
+        new(50, ROOT, "bigfile.bin", false, 0, when),                   // base, size unknown inline
+        new(51, 0, "", false, 5000, default, BaseRecordFrn: 50),        // extension carrying $DATA
+    };
+    var fragTree = Reclaim.Core.Scanning.MftTreeBuilder.Build(fragRecords, ROOT, "C:");
+    var big = Find(fragTree, @"C:\bigfile.bin");
+    Check(big is not null, "mft: fragmented base file appears in tree");
+    Check(big!.SizeBytes == 5000, $"mft: extension $DATA size used when base is 0 (got {big.SizeBytes})");
+    Check(fragTree.Children.All(c => c.Name != ""), "mft: nameless extension record not a tree node");
+
+    // Double-count guard: a base record that ALREADY reports the full size, plus an
+    // extension record that also reports the same real size (extra data runs for the
+    // same $DATA). The result must be the real size, NOT the sum (which was a bug).
+    var dupRecords = new List<Reclaim.Core.Scanning.MftRecord>
+    {
+        new(60, ROOT, "movie.mkv", false, 8000, when),                 // base already has full size
+        new(61, 0, "", false, 8000, default, BaseRecordFrn: 60),       // extension repeats real size
+    };
+    var dupTree = Reclaim.Core.Scanning.MftTreeBuilder.Build(dupRecords, ROOT, "C:");
+    var movie = Find(dupTree, @"C:\movie.mkv");
+    Check(movie!.SizeBytes == 8000, $"mft: base+extension same size not doubled (got {movie.SizeBytes})");
+
+    // $ATTRIBUTE_LIST name promotion: base record holds only the DOS 8.3 short name
+    // (namespace 2), and an extension record carries the Win32 long name (ns 1).
+    // The tree must show the LONG name and not create a duplicate node.
+    var promoteRecords = new List<Reclaim.Core.Scanning.MftRecord>
+    {
+        // base: DOS short name, ChosenNamespace 2
+        new(70, ROOT, "LONGFI~1.DLL", false, 12345, when, BaseRecordFrn: 0,
+            ChosenNamespace: 2),
+        // extension: carries the Win32 long name (ns 1) and the $DATA size
+        new(71, 0, "LongFileName.dll", false, 12345, default, BaseRecordFrn: 70,
+            ChosenNamespace: 1),
+    };
+    var promoteTree = Reclaim.Core.Scanning.MftTreeBuilder.Build(promoteRecords, ROOT, "C:");
+    Check(Find(promoteTree, @"C:\LongFileName.dll") is not null,
+        "mft: long name promoted from extension record");
+    Check(Find(promoteTree, @"C:\LONGFI~1.DLL") is null,
+        "mft: DOS short name not shown when long name available");
+    Check(promoteTree.Children.Count(c => c.Name is "LongFileName.dll" or "LONGFI~1.DLL") == 1,
+        "mft: exactly one node for the file (no duplicate)");
+}
+
+// ---- NTFS MFT record parser (synthetic records with fixup) ----
+{
+    // Build a minimal but valid 1024-byte FILE record for a file named "report.txt",
+    // parent FRN 5, size 4096, with a correct fixup sequence across both sectors.
+    const int recSize = 1024, sectorSize = 512;
+    var rec = new byte[recSize];
+
+    // Header: "FILE"
+    rec[0] = (byte)'F'; rec[1] = (byte)'I'; rec[2] = (byte)'L'; rec[3] = (byte)'E';
+    // Update sequence array at offset 0x30, count 3 (1 check value + 2 sectors).
+    const int usaOffset = 0x30, usaCount = 3;
+    BitConverter.GetBytes((ushort)usaOffset).CopyTo(rec, 0x04);
+    BitConverter.GetBytes((ushort)usaCount).CopyTo(rec, 0x06);
+    // Flags: in-use (0x01), not a directory.
+    BitConverter.GetBytes((ushort)0x0001).CopyTo(rec, 0x16);
+    // First attribute at offset 0x38.
+    const int firstAttr = 0x38;
+    BitConverter.GetBytes((ushort)firstAttr).CopyTo(rec, 0x14);
+
+    // --- $FILE_NAME attribute (type 0x30, resident) ---
+    var name = "report.txt";
+    var nameBytes = System.Text.Encoding.Unicode.GetBytes(name);
+    var fnContent = new byte[0x42 + nameBytes.Length];
+    BitConverter.GetBytes((ulong)5).CopyTo(fnContent, 0x00);          // parent FRN = 5
+    BitConverter.GetBytes((long)4096).CopyTo(fnContent, 0x30);        // real size
+    fnContent[0x40] = (byte)name.Length;                              // name length (chars)
+    fnContent[0x41] = 1;                                              // namespace (1 = Win32)
+    nameBytes.CopyTo(fnContent, 0x42);
+
+    var fnHeaderLen = 0x18;
+    var fnAttrLen = fnHeaderLen + fnContent.Length;
+    var off = firstAttr;
+    BitConverter.GetBytes((uint)0x30).CopyTo(rec, off + 0x00);        // type
+    BitConverter.GetBytes(fnAttrLen).CopyTo(rec, off + 0x04);         // length
+    rec[off + 0x08] = 0;                                             // resident
+    BitConverter.GetBytes((ushort)fnHeaderLen).CopyTo(rec, off + 0x14); // content offset
+    fnContent.CopyTo(rec, off + fnHeaderLen);
+
+    // --- $DATA attribute (type 0x80, non-resident, real size 4096) ---
+    off += fnAttrLen;
+    BitConverter.GetBytes((uint)0x80).CopyTo(rec, off + 0x00);       // type
+    BitConverter.GetBytes(0x40).CopyTo(rec, off + 0x04);            // length (header only)
+    rec[off + 0x08] = 1;                                            // non-resident
+    BitConverter.GetBytes((long)4096).CopyTo(rec, off + 0x30);      // real size
+    off += 0x40;
+
+    // --- end marker ---
+    BitConverter.GetBytes(0xFFFFFFFF).CopyTo(rec, off);
+
+    // --- Apply a fixup: put the check value at each sector's last 2 bytes, and the
+    // "real" originals into the USA. We choose check = 0xABCD, originals 0x1111/0x2222.
+    ushort check = 0xABCD;
+    BitConverter.GetBytes(check).CopyTo(rec, usaOffset);             // USA[0] = check
+    BitConverter.GetBytes((ushort)0x1111).CopyTo(rec, usaOffset + 2); // USA[1] sector0 original
+    BitConverter.GetBytes((ushort)0x2222).CopyTo(rec, usaOffset + 4); // USA[2] sector1 original
+    // Write the check value into the last 2 bytes of each sector (what NTFS does on disk).
+    BitConverter.GetBytes(check).CopyTo(rec, sectorSize - 2);        // end of sector 0
+    BitConverter.GetBytes(check).CopyTo(rec, 2 * sectorSize - 2);    // end of sector 1
+
+    var parsed = Reclaim.Core.Scanning.NtfsRecordParser.Parse(rec, sectorSize, ownFrn: 42);
+
+    Check(parsed is not null, "ntfs: valid record parses");
+    Check(parsed!.Value.Name == "report.txt", $"ntfs: name extracted (got '{parsed.Value.Name}')");
+    Check(parsed.Value.ParentFileReferenceNumber == 5, "ntfs: parent FRN extracted");
+    Check(parsed.Value.SizeBytes == 4096, $"ntfs: size from $DATA (got {parsed.Value.SizeBytes})");
+    Check(!parsed.Value.IsDirectory, "ntfs: file (not directory) flag");
+    Check(parsed.Value.FileReferenceNumber == 42, "ntfs: own FRN passed through");
+    // Confirm the fixup actually restored the original bytes.
+    Check(BitConverter.ToUInt16(rec, sectorSize - 2) == 0x1111, "ntfs: fixup restored sector 0 tail");
+    Check(BitConverter.ToUInt16(rec, 2 * sectorSize - 2) == 0x2222, "ntfs: fixup restored sector 1 tail");
+
+    // A record with a wrong fixup check value must be rejected as corrupt.
+    var bad = (byte[])rec.Clone();
+    BitConverter.GetBytes((ushort)0x9999).CopyTo(bad, sectorSize - 2); // tamper
+    Check(Reclaim.Core.Scanning.NtfsRecordParser.Parse(bad, sectorSize, 42) is null,
+        "ntfs: record with bad fixup is rejected");
+
+    // Non-FILE signature → null.
+    var notFile = new byte[recSize];
+    Check(Reclaim.Core.Scanning.NtfsRecordParser.Parse(notFile, sectorSize, 1) is null,
+        "ntfs: non-FILE record rejected");
+
+    // Guard against the misread that caused unpaired surrogates: a $FILE_NAME whose
+    // declared length would run past the record must NOT be read as a (garbage) name.
+    // Build a fresh valid record, then set an absurd name length and re-fixup.
+    var bigName = new byte[recSize];
+    rec.CopyTo(bigName, 0);                 // start from the parsed-good record
+    // Find the $FILE_NAME content name-length byte and inflate it wildly.
+    // (firstAttr + fnHeaderLen + 0x40 is the name-length field, per how we built it.)
+    var nameLenPos = firstAttr + fnHeaderLen + 0x40;
+    bigName[nameLenPos] = 250;              // 250 chars * 2 = 500 bytes — overruns
+    // rebuild fixup tails so the record still validates structurally
+    BitConverter.GetBytes(check).CopyTo(bigName, sectorSize - 2);
+    BitConverter.GetBytes(check).CopyTo(bigName, 2 * sectorSize - 2);
+    var parsedBig = Reclaim.Core.Scanning.NtfsRecordParser.Parse(bigName, sectorSize, 7);
+    // Either it's rejected (null) or it skipped the bad name — but it must NOT return
+    // a name containing unpaired surrogates / garbage.
+    Check(parsedBig is null || !ContainsLoneSurrogate(parsedBig.Value.Name),
+        "ntfs: over-long name length doesn't produce a garbage name");
+}
+
+static bool ContainsLoneSurrogate(string s)
+{
+    for (var i = 0; i < s.Length; i++)
+    {
+        if (char.IsHighSurrogate(s[i]))
+        {
+            if (i + 1 >= s.Length || !char.IsLowSurrogate(s[i + 1])) return true;
+            i++;
+        }
+        else if (char.IsLowSurrogate(s[i])) return true;
+    }
+    return false;
+}
+
+// ---- NTFS boot sector parser ----
+{
+    var boot = new byte[512];
+    boot[3] = (byte)'N'; boot[4] = (byte)'T'; boot[5] = (byte)'F'; boot[6] = (byte)'S';
+    BitConverter.GetBytes((ushort)512).CopyTo(boot, 0x0B);   // bytes/sector
+    boot[0x0D] = 8;                                          // sectors/cluster → 4096 B/cluster
+    BitConverter.GetBytes((long)786432).CopyTo(boot, 0x30);  // MFT start cluster
+    boot[0x40] = unchecked((byte)(sbyte)-10);                // 2^10 = 1024 B/record
+
+    var geo = Reclaim.Core.Scanning.NtfsBootSectorParser.Parse(boot);
+    Check(geo is not null, "boot: NTFS boot sector parses");
+    Check(geo!.Value.BytesPerSector == 512, "boot: bytes/sector");
+    Check(geo.Value.BytesPerCluster == 4096, "boot: bytes/cluster computed");
+    Check(geo.Value.MftStartCluster == 786432, "boot: MFT start cluster");
+    Check(geo.Value.BytesPerMftRecord == 1024, "boot: record size from negative encoding");
+    Check(geo.Value.MftByteOffset == 786432L * 4096, "boot: MFT byte offset computed");
+    // Non-NTFS boot sector rejected.
+    Check(Reclaim.Core.Scanning.NtfsBootSectorParser.Parse(new byte[512]) is null,
+        "boot: non-NTFS rejected");
+}
+
+// ---- NTFS data-run decoder ----
+{
+    // Two runs:
+    //  Run 1: length 0x10 clusters, start delta +0x20  → start 0x20
+    //  Run 2: length 0x08 clusters, start delta -0x10  → start 0x10 (goes backward!)
+    // Encoding bytes:
+    //  header 0x11 (1 length byte, 1 offset byte), len 0x10, off 0x20
+    //  header 0x11, len 0x08, off 0xF0 (== -16 signed)
+    //  terminator 0x00
+    var runList = new byte[] { 0x11, 0x10, 0x20, 0x11, 0x08, 0xF0, 0x00 };
+    var runs = Reclaim.Core.Scanning.NtfsDataRunDecoder.Decode(runList);
+
+    Check(runs.Count == 2, $"runs: two runs decoded (got {runs.Count})");
+    Check(runs[0].StartCluster == 0x20 && runs[0].ClusterCount == 0x10, "runs: first run absolute");
+    Check(runs[1].ClusterCount == 0x08, "runs: second run length");
+    Check(runs[1].StartCluster == 0x10, $"runs: negative delta applied (got {runs[1].StartCluster})");
+
+    // Multi-byte length: header 0x12 = low nibble 2 (length bytes), high nibble 1
+    // (offset byte). len 0x0100 (bytes 0x00,0x01), off 0x05.
+    var rl2 = new byte[] { 0x12, 0x00, 0x01, 0x05, 0x00 };
+    var runs2 = Reclaim.Core.Scanning.NtfsDataRunDecoder.Decode(rl2);
+    Check(runs2.Count == 1 && runs2[0].ClusterCount == 0x100, "runs: multi-byte length decoded");
+    Check(runs2[0].StartCluster == 0x05, "runs: multi-byte run start");
+}
+
+// ---- text file preview (hover preview logic) ----
+{
+    // Extension detection.
+    Check(Reclaim.Core.Knowledge.TextFilePreview.LooksLikeTextFile(@"C:\a\notes.txt"),
+        "preview: .txt recognized as text");
+    Check(Reclaim.Core.Knowledge.TextFilePreview.LooksLikeTextFile(@"C:\a\app.log"),
+        "preview: .log recognized as text");
+    Check(Reclaim.Core.Knowledge.TextFilePreview.LooksLikeTextFile(@"C:\proj\.gitignore"),
+        "preview: dotfile (.gitignore) recognized as text");
+    Check(!Reclaim.Core.Knowledge.TextFilePreview.LooksLikeTextFile(@"C:\a\photo.jpg"),
+        "preview: .jpg not text");
+    Check(!Reclaim.Core.Knowledge.TextFilePreview.LooksLikeTextFile(@"C:\a\tool.exe"),
+        "preview: .exe not text");
+
+    // Plain text content.
+    var hello = System.Text.Encoding.UTF8.GetBytes("line one\nline two\nline three");
+    var p = Reclaim.Core.Knowledge.TextFilePreview.BuildPreview(hello, hello.Length);
+    Check(p is not null && p.Contains("line one") && p.Contains("line three"),
+        "preview: plain text rendered");
+
+    // CRLF normalized to LF.
+    var crlf = System.Text.Encoding.UTF8.GetBytes("a\r\nb\r\nc");
+    var pc = Reclaim.Core.Knowledge.TextFilePreview.BuildPreview(crlf, crlf.Length);
+    Check(pc is not null && !pc.Contains('\r') && pc.Split('\n').Length == 3,
+        "preview: CRLF normalized");
+
+    // Binary content (NUL byte) → null.
+    var bin = new byte[] { 0x4D, 0x5A, 0x00, 0x01, 0x02, 0x03 };
+    Check(Reclaim.Core.Knowledge.TextFilePreview.BuildPreview(bin, bin.Length) is null,
+        "preview: NUL byte → treated as binary (null)");
+
+    // High control-byte ratio → null.
+    var ctrl = new byte[200];
+    for (var i = 0; i < ctrl.Length; i++) ctrl[i] = (byte)(i % 2 == 0 ? 'A' : 0x01);
+    Check(Reclaim.Core.Knowledge.TextFilePreview.BuildPreview(ctrl, ctrl.Length) is null,
+        "preview: many control bytes → binary (null)");
+
+    // UTF-8 BOM stripped.
+    var bom = new byte[] { 0xEF, 0xBB, 0xBF }
+        .Concat(System.Text.Encoding.UTF8.GetBytes("hello")).ToArray();
+    var pb = Reclaim.Core.Knowledge.TextFilePreview.BuildPreview(bom, bom.Length);
+    Check(pb == "hello", $"preview: UTF-8 BOM stripped (got '{pb}')");
+
+    // Line cap: 250 lines → truncated to MaxLines with marker.
+    var many = string.Join("\n", Enumerable.Range(1, 250).Select(i => $"L{i}"));
+    var mb = System.Text.Encoding.UTF8.GetBytes(many);
+    var pm = Reclaim.Core.Knowledge.TextFilePreview.BuildPreview(mb, mb.Length);
+    Check(pm is not null && pm.Contains("preview truncated"),
+        "preview: long file truncated with marker");
+    Check(pm!.Split('\n').Length <= Reclaim.Core.Knowledge.TextFilePreview.MaxLines + 1,
+        "preview: capped near MaxLines");
+
+    // Empty/whitespace → null (nothing useful to show).
+    var ws = System.Text.Encoding.UTF8.GetBytes("   \n  \n");
+    Check(Reclaim.Core.Knowledge.TextFilePreview.BuildPreview(ws, ws.Length) is null,
+        "preview: whitespace-only → null");
 }
 
 Console.WriteLine();Console.WriteLine(failures == 0 ? "All tests passed." : $"{failures} test(s) FAILED.");

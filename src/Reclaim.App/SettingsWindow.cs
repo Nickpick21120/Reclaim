@@ -15,6 +15,8 @@ public sealed class SettingsWindow : Window
     private readonly AppSettings _settings;
     private readonly CheckBox _permanentDelete;
     private readonly CheckBox _rememberFolder;
+    private readonly CheckBox _previewText;
+    private readonly CheckBox _mftScan;
 
     /// <summary>Set to true if the user saved changes, so the caller can apply them.</summary>
     public bool Saved { get; private set; }
@@ -72,6 +74,48 @@ public sealed class SettingsWindow : Window
         };
         root.Children.Add(_rememberFolder);
 
+        // --- Display ---
+        root.Children.Add(SectionLabel("Display"));
+        _previewText = new CheckBox
+        {
+            Content = "Preview text file contents in the info panel",
+            Foreground = Theme.TextBrush,
+            IsChecked = _settings.PreviewTextOnHover,
+            Margin = new Thickness(0, 4, 0, 0),
+        };
+        root.Children.Add(_previewText);
+        root.Children.Add(new TextBlock
+        {
+            Foreground = Theme.TextDimBrush, FontSize = 11, TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(22, 4, 0, 0),
+            Text = "When you select a text file (.txt, .log, .json, code, etc.), show a "
+                 + "scrollable preview of its contents in the file-information panel. "
+                 + "Reads a small amount of the file from disk when selected.",
+        });
+
+        // --- Experimental ---
+        root.Children.Add(SectionLabel("Experimental"));
+        _mftScan = new CheckBox
+        {
+            Content = "Fast MFT scan for whole NTFS drives (requires admin)",
+            Foreground = Theme.TextBrush,
+            IsChecked = _settings.ExperimentalMftScan,
+            Margin = new Thickness(0, 4, 0, 0),
+        };
+        root.Children.Add(_mftScan);
+        var mftHelp = "Reads the NTFS Master File Table directly for very fast whole-drive "
+                    + "scans (typically a few seconds). Applies when scanning a drive root "
+                    + "as administrator; otherwise the normal scanner is used automatically.";
+        if (!Services.Elevation.IsElevated())
+            mftHelp += "  You're not running as administrator right now — enabling this "
+                     + "will offer to restart Reclaim as admin.";
+        root.Children.Add(new TextBlock
+        {
+            Foreground = Theme.TextDimBrush, FontSize = 11, TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(22, 4, 0, 0),
+            Text = mftHelp,
+        });
+
         // --- Buttons ---
         var buttons = new StackPanel
         {
@@ -114,13 +158,50 @@ public sealed class SettingsWindow : Window
 
     private void DoSave()
     {
+        var mftNewlyEnabled = _mftScan.IsChecked == true && !_settings.ExperimentalMftScan;
+
         _settings.DefaultPermanentDelete = _permanentDelete.IsChecked == true;
         _settings.RememberLastFolder = _rememberFolder.IsChecked == true;
+        _settings.PreviewTextOnHover = _previewText.IsChecked == true;
+        _settings.ExperimentalMftScan = _mftScan.IsChecked == true;
         // If the user turned off "remember", clear any stored folder too.
         if (!_settings.RememberLastFolder)
             _settings.LastFolder = "";
         _settings.Save();
         Saved = true;
+
+        // MFT scanning reads the raw NTFS volume, which requires administrator
+        // rights. If the user just enabled it but isn't elevated, offer to restart
+        // as admin now — an explicit, informed choice (it triggers a UAC prompt).
+        // Declining is fine: the setting stays on and takes effect next time the app
+        // runs elevated; until then scans transparently use the normal scanner.
+        if (mftNewlyEnabled && !Services.Elevation.IsElevated())
+        {
+            var choice = MessageBox.Show(
+                "Fast MFT scanning reads the raw NTFS volume directly, which requires "
+                + "running Reclaim as administrator.\n\n"
+                + "Restart Reclaim as administrator now to use it?\n\n"
+                + "You can also say No — the setting is saved and will take effect the "
+                + "next time you run Reclaim as administrator. Until then, scans use the "
+                + "normal scanner automatically.",
+                "Restart as administrator?",
+                MessageBoxButton.YesNo, MessageBoxImage.Question);
+
+            if (choice == MessageBoxResult.Yes)
+            {
+                // Relaunch elevated (UAC). If the user declines UAC or it fails, we
+                // stay running un-elevated; the setting remains saved either way.
+                if (!Services.Elevation.RestartElevated())
+                {
+                    MessageBox.Show(
+                        "Reclaim wasn't restarted as administrator. The MFT setting is "
+                        + "saved and will apply once you run Reclaim as administrator.",
+                        "Not restarted", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+                // If RestartElevated() succeeded it already shut this instance down.
+            }
+        }
+
         Close();
     }
 }

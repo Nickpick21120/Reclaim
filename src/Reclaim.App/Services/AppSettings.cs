@@ -25,6 +25,16 @@ public sealed class AppSettings
     /// <summary>The last folder scanned (only used when RememberLastFolder is on).</summary>
     public string LastFolder { get; set; } = "";
 
+    /// <summary>EXPERIMENTAL: use the raw-MFT fast scanner for whole-NTFS-drive scans
+    /// when running elevated. Falls back to the normal scanner otherwise. Off by
+    /// default — this is unverified on the user's hardware until they enable it.</summary>
+    public bool ExperimentalMftScan { get; set; }
+
+    /// <summary>When on, selecting a text file shows a scrollable preview of its
+    /// contents in the file-information panel. On by default; reads a small amount
+    /// of the file from disk when a text file is selected.</summary>
+    public bool PreviewTextOnHover { get; set; } = true;
+
     private static string Dir =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Reclaim");
 

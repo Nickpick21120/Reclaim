@@ -35,6 +35,12 @@ crash reporting, and a self-contained distributable build are all in place.
   to remove. It knows common system files, folders, and extensions, and infers
   sensible context from a file's location (e.g. a file under System32 is described
   as a Windows system file) even when it has no specific entry.
+- **Text-file preview**: selecting a text file (`.txt`, `.log`, `.json`, code, and
+  similar) shows a scrollable preview of its contents in the information panel, so
+  you can see what a file is without opening it. Reads only a small amount of the
+  file; on by default and toggleable in Settings → Display.
+- **Open from the list**: right-click a file in List view and choose **Open** to
+  open it in your default application.
 - **Manual deletion** via right-click: delete a file, empty a folder's contents
   (keeping the folder), or delete a whole folder. Recoverable by default.
 
@@ -192,6 +198,25 @@ testable with fakes. The test harness covers the scanner, treemap math, cleanup
 analysis, deletion-engine safety, the location-trust classifier, file knowledge,
 duplicate detection, and the large-and-old finder.
 
+## Experimental: fast MFT scanning
+
+Reclaim includes an **experimental** fast scanner that reads the NTFS Master File
+Table directly, scanning a whole drive in a few seconds instead of tens of
+seconds. It's **off by default** and opt-in via Settings → Experimental → "Fast
+MFT scan".
+
+Because it reads the raw volume, it requires running Reclaim **as administrator**;
+enabling it offers to restart elevated. It only engages when scanning an NTFS
+fixed-drive **root** while elevated — for subfolders, non-NTFS drives, or when not
+elevated, Reclaim transparently uses the normal directory scanner instead. The
+MFT scanner is strictly read-only (it opens the volume for reading only).
+
+Accuracy is very close to the normal scanner (within a fraction of a percent on a
+typical system); small differences come from filesystem features the two scanners
+account for differently, such as Volume Shadow Copy data, cloud-backed (OneDrive)
+files, and hardlinked system components. As an experimental feature it's best used
+for quick whole-drive overviews; the normal scanner remains the default.
+
 ## Roadmap
 
 Done (1.0): scanner + folder-coloured treemap, reclaimable-space detection,
@@ -201,9 +226,7 @@ finder, CSV/JSON export, Recycle Bin management, a settings dialog, optional
 elevation, crash reporting, and a self-contained distributable build with
 automated GitHub releases.
 
-Possible next steps (post-1.0):
-- **Fast NTFS scan**: read the Master File Table directly for whole-volume scans
-  in seconds (requires elevation; NTFS only; falls back to the directory walker).
+Possible next steps:
 - **Scan history / comparison**: save a scan and compare later to see what grew.
 - **File-type breakdown**: aggregate space by file type across the scan.
 - **Light/dark theme toggle**: the colour system is already centralized for this.
