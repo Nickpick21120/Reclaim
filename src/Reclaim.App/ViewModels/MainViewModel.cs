@@ -67,6 +67,9 @@ public sealed class MainViewModel : ViewModelBase
         CleanSelectedCommand = new RelayCommand(CleanSelected, () => SelectedCleanupCount > 0 && !IsScanning);
         DeleteFileCommand = new RelayCommand<object>(o => DeleteFileManually(NodeOf(o)));
         OpenFileCommand = new RelayCommand<object>(o => OpenFile(NodeOf(o)));
+        BrowseToLocationCommand = new RelayCommand<object>(o => BrowseToLocation(NodeOf(o)));
+        RefreshCommand = new RelayCommand(async () => await RefreshAsync(),
+            () => _scannedRoot is not null && !IsScanning);
         DeleteContentsCommand = new RelayCommand<object>(o => DeleteFolderContentsManually(NodeOf(o)));
         DeleteFolderCommand = new RelayCommand<object>(o => DeleteFolderManually(NodeOf(o)));
         CleanThisFileCommand = new RelayCommand<object>(o => CleanSingleFile(o as FlatItemViewModel));
@@ -435,6 +438,8 @@ public sealed class MainViewModel : ViewModelBase
 
     public RelayCommand<object> DeleteFileCommand { get; }
     public RelayCommand<object> OpenFileCommand { get; }
+    public RelayCommand<object> BrowseToLocationCommand { get; }
+    public RelayCommand RefreshCommand { get; }
 
     /// <summary>Open a file in the OS default application (right-click → Open).
     /// Only opens files, never directories. Uses the shell, and surfaces a friendly
@@ -709,6 +714,7 @@ public sealed class MainViewModel : ViewModelBase
                 ChooseDuplicateScopeCommand.RaiseCanExecuteChanged();
                 FindLargeOldCommand.RaiseCanExecuteChanged();
                 ExportScanCommand.RaiseCanExecuteChanged();
+                RefreshCommand.RaiseCanExecuteChanged();
             }
         }
     }
@@ -834,6 +840,75 @@ public sealed class MainViewModel : ViewModelBase
     {
         get => _rootViewModel;
         private set => Set(ref _rootViewModel, value);
+    }
+
+    /// <summary>Right-click "Browse to location" on a directory in the list: drill
+    /// the shared focus into that folder (same as double-clicking it). Files are
+    /// ignored — there's nothing to browse into.</summary>
+    private void BrowseToLocation(FileSystemNode? node)
+    {
+        if (node is null || !node.IsDirectory)
+            return;
+        FocusOn(node);
+        if (View != RightPaneView.LargestItems)
+            View = RightPaneView.LargestItems;
+    }
+
+    /// <summary>Re-scan the originally scanned root and restore the user's current
+    /// focus folder afterward, so "Refresh" picks up filesystem changes without
+    /// losing your place. If the focus folder no longer exists after the rescan,
+    /// falls back to the nearest surviving ancestor (ultimately the root).</summary>
+    private async Task RefreshAsync()
+    {
+        if (_scannedRoot is null || IsScanning)
+            return;
+
+        // Remember where we are (and what we were scanning) by PATH — the tree is
+        // rebuilt from scratch, so node references won't survive the rescan.
+        var rootPath = _scannedRoot.FullPath;
+        var focusPath = (_treemapRoot ?? _scannedRoot).FullPath;
+
+        // Re-scan the original root (not whatever is currently typed in the box).
+        TargetPath = rootPath;
+        await ScanAsync();
+
+        // After a successful rescan, restore focus to the deepest still-existing
+        // node along the saved focus path.
+        if (_scannedRoot is null)
+            return; // scan failed/canceled; ScanAsync already reported why
+        var restored = FindByPath(_scannedRoot, focusPath) ?? _scannedRoot;
+        FocusOn(restored);
+    }
+
+    /// <summary>Walk the tree to the node whose FullPath matches <paramref name="path"/>,
+    /// or the deepest ancestor that does exist if the exact node is gone. Returns
+    /// null only if even the root doesn't prefix the path.</summary>
+    private static FileSystemNode? FindByPath(FileSystemNode root, string path)
+    {
+        if (string.Equals(root.FullPath, path, StringComparison.OrdinalIgnoreCase))
+            return root;
+        // Only descend if the target is actually under this root.
+        if (!path.StartsWith(root.FullPath, StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var current = root;
+        while (!string.Equals(current.FullPath, path, StringComparison.OrdinalIgnoreCase))
+        {
+            FileSystemNode? next = null;
+            foreach (var child in current.Children)
+            {
+                if (child.IsDirectory
+                    && path.StartsWith(child.FullPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    next = child;
+                    break;
+                }
+            }
+            if (next is null)
+                return current; // deepest surviving ancestor
+            current = next;
+        }
+        return current;
     }
 
     private async Task ScanAsync()
